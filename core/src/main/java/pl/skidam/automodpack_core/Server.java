@@ -4,6 +4,7 @@ import pl.skidam.automodpack_core.config.ConfigTools;
 import pl.skidam.automodpack_core.config.Jsons;
 import pl.skidam.automodpack_core.modpack.ModpackExecutor;
 import pl.skidam.automodpack_core.modpack.FullServerPack;
+import pl.skidam.automodpack_core.modpack.FullServerPackContent;
 import pl.skidam.automodpack_core.modpack.ModpackContent;
 import pl.skidam.automodpack_core.protocol.netty.NettyServer;
 
