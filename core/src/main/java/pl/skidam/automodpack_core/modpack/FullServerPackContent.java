@@ -17,7 +17,7 @@ import static pl.skidam.automodpack_core.GlobalVariables.*;
 
 public class FullServerPackContent {
 
-    public final Set<Jsons.FullServerPackContentFields.FullServerPackContentItem> list = Collections.synchronizedSet(new HashSet<>());
+    public final Set<Json.FullServerPackContentFields.FullServerPackContentItem> list = Collections.synchronizedSet(new HashSet<>());
     private final String MODPACK_NAME;
     private final Path MODPACK_DIR;
     private final ThreadPoolExecutor CREATION_EXECUTOR;
@@ -45,7 +45,7 @@ public class FullServerPackContent {
                 return false;
             }
 
-            Jsons.ServerConfigFields serverConfig = ConfigTools.load(serverConfigFile, Jsons.ServerConfigFields.class);
+            Json.ServerConfigFields serverConfig = ConfigTools.load(serverConfigFile, Json.ServerConfigFields.class);
             if (serverConfig == null || !serverConfig.enableFullServerPack) {
                 LOGGER.info("FullServerPack creation is disabled or config invalid.");
                 return false;
@@ -134,7 +134,7 @@ public class FullServerPackContent {
             });
 
             // generate content and save it
-            Jsons.FullServerPackContentFields fullServerContent = buildFullServerPackContent(filesToInclude);
+            Json.FullServerPackContentFields fullServerContent = buildFullServerPackContent(filesToInclude);
 
             Path outputPath = hostModpackDir.resolve("fullserverpack-content.json");
             ConfigTools.saveFullServerPackContent(outputPath, fullServerContent);
@@ -148,14 +148,14 @@ public class FullServerPackContent {
         }
     }
 
-    private List<Path> collectFiles(Jsons.ServerConfigFields serverConfig) {
+    private List<Path> collectFiles(Json.ServerConfigFields serverConfig) {
         List<Path> filesToInclude = new ArrayList<>();
 
         return filesToInclude;
     }
 
-    public Jsons.FullServerPackContentFields buildFullServerPackContent(List<Path> files) {
-        Set<Jsons.FullServerPackContentFields.FullServerPackContentItem> contentList =
+    public Json.FullServerPackContentFields buildFullServerPackContent(List<Path> files) {
+        Set<Json.FullServerPackContentFields.FullServerPackContentItem> contentList =
                 Collections.synchronizedSet(new HashSet<>());
 
         //ADDED ATOMICInteger to read, how much files are processed
@@ -176,10 +176,10 @@ public class FullServerPackContent {
 
         futures.forEach(CompletableFuture::join);
 
-        return new Jsons.FullServerPackContentFields(MODPACK_NAME, MC_VERSION, LOADER, contentList);
+        return new Json.FullServerPackContentFields(MODPACK_NAME, MC_VERSION, LOADER, contentList);
     }
 
-    private void generate(Path file, Set<Jsons.FullServerPackContentFields.FullServerPackContentItem> contentList) {
+    private void generate(Path file, Set<Json.FullServerPackContentFields.FullServerPackContentItem> contentList) {
         try {
             if (!Files.isRegularFile(file)) return;
 
@@ -219,7 +219,7 @@ public class FullServerPackContent {
             }
 
             String cleanedFile = formattedFile.replaceAll("^/+", "/");
-            var item = new Jsons.FullServerPackContentFields.FullServerPackContentItem(cleanedFile, size, type, sha1, murmur);
+            var item = new Json.FullServerPackContentFields.FullServerPackContentItem(cleanedFile, size, type, sha1, murmur);
             contentList.add(item);
 
         } catch (Exception e) {
@@ -240,7 +240,7 @@ public class FullServerPackContent {
             }
 
             //load config
-            Jsons.ServerConfigFields serverConfig = ConfigTools.load(automodpackserverConfig, Jsons.ServerConfigFields.class);
+            Json.ServerConfigFields serverConfig = ConfigTools.load(automodpackserverConfig, Json.ServerConfigFields.class);
             //if config null or false, stop
             if (serverConfig == null || !serverConfig.enableFullServerPack) {
                 LOGGER.info("Fullserverpack creation on default disabled.");
@@ -318,7 +318,7 @@ public class FullServerPackContent {
 
             try {
                 FullServerPackContent fullServerPack = new FullServerPackContent("FullServer", CustomFileUtils.getPathFromCWD("automodpack/host-modpack"), (ThreadPoolExecutor) Executors.newFixedThreadPool(4));
-                Jsons.FullServerPackContentFields fullServerContent = fullServerPack.buildFullServerPackContent(filesToInclude);
+                Json.FullServerPackContentFields fullServerContent = fullServerPack.buildFullServerPackContent(filesToInclude);
 
                 Path outputPath = CustomFileUtils.getPathFromCWD("automodpack/host-modpack/fullserverpack-content.json");
                 ConfigTools.saveFullServerPackContent(outputPath, fullServerContent);
