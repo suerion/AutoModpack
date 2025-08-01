@@ -45,7 +45,7 @@ public class FullServerPackContent {
                 return false;
             }
 
-            Jsons.ServerConfigFields serverConfig = ConfigTools.load(serverConfigFile, Jsons.ServerConfigFields.class);
+            Jsons.ServerConfigFieldsV1 serverConfig = ConfigTools.load(serverConfigFile, Jsons.ServerConfigFieldsV1.class);
             if (serverConfig == null || !serverConfig.enableFullServerPack) {
                 LOGGER.info("FullServerPack creation is disabled or config invalid.");
                 return false;
@@ -148,7 +148,7 @@ public class FullServerPackContent {
         }
     }
 
-    private List<Path> collectFiles(Jsons.ServerConfigFields serverConfig) {
+    private List<Path> collectFiles(Jsons.ServerConfigFieldsV1 serverConfig) {
         List<Path> filesToInclude = new ArrayList<>();
 
         return filesToInclude;
@@ -240,7 +240,7 @@ public class FullServerPackContent {
             }
 
             //load config
-            Jsons.ServerConfigFields serverConfig = ConfigTools.load(automodpackserverConfig, Jsons.ServerConfigFields.class);
+            Jsons.ServerConfigFieldsV1 serverConfig = ConfigTools.load(automodpackserverConfig, Jsons.ServerConfigFieldsV1.class);
             //if config null or false, stop
             if (serverConfig == null || !serverConfig.enableFullServerPack) {
                 LOGGER.info("Fullserverpack creation on default disabled.");
