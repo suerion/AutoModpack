@@ -2,7 +2,7 @@ package pl.skidam.automodpack.client.ui;
 
 import java.util.List;
 
-import net.minecraft.util.Formatting;
+import net.minecraft.ChatFormatting;
 import net.minecraft.util.Util;
 import pl.skidam.automodpack_loader_core.client.ModpackUpdater;
 import pl.skidam.automodpack.client.audio.AudioManager;
