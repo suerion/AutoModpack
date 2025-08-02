@@ -71,8 +71,6 @@ public class Server {
             LOGGER.error("Failed to generate modpack!");
         }
 
-        //beta modpack Executor 
-        //modpackExecutor.stop();
 
         // change hostPort to bindPort?
         //LOGGER.info("Starting server on port {}", serverConfig.bindPort);
@@ -90,7 +88,14 @@ public class Server {
 
         modpackExecutor.stop();
         fullserverpack.shutdownExecutor();
-        LOGGER.info("Starting server on port {}", serverConfig.hostPort);
+
+        //From Beta
+        // change hostPort to bindPort?
+        //LOGGER.info("Starting server on port {}", serverConfig.bindPort);
+
+        //Old Port V1
+        //LOGGER.info("Starting server on port {}", serverConfig.hostPort);
+        LOGGER.info("Starting server on port {}", serverConfig.bindPort);
 
         server.start();
         // wait for server to stop
