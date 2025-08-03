@@ -100,6 +100,8 @@ public class Jsons {
         public boolean generateModpackOnStart = true;
         public List<String> syncedFiles = List.of("/mods/*.jar", "/kubejs/**", "!/kubejs/server_scripts/**", "/emotes/*");
         public List<String> allowEditsInFiles = List.of("/options.txt", "/config/**");
+        //v2 will need also enable fullserverpack
+        public boolean enableFullServerPack = false;
         public List<String> forceCopyFilesToStandardLocation = List.of();
         public boolean autoExcludeServerSideMods = true;
         public boolean autoExcludeUnnecessaryFiles = true;

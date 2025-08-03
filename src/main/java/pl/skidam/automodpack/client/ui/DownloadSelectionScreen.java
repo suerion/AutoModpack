@@ -2,9 +2,9 @@ package pl.skidam.automodpack.client.ui;
 
 import java.util.List;
 
-import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.util.Formatting;
-import net.minecraft.util.Util;
+import net.minecraft.ChatFormatting;
+import net.minecraft.Util;
+import net.minecraft.client.gui.screens.Screen;
 import pl.skidam.automodpack_loader_core.client.ModpackUpdater;
 import pl.skidam.automodpack.client.audio.AudioManager;
 
@@ -31,10 +31,10 @@ public class DownloadSelectionScreen extends VersionedScreen {
     @Override
     protected void init() {
         super.init();
-        assert this.client != null;
+        assert this.minecraft != null;
 
         this.addDrawableChild(buttonWidget(this.width / 2, this.height / 2 + 150, 120, 20, VersionedText.translatable("automodpack.ds.cancel"), button -> {
-            this.client.setScreen(parent);
+            this.minecraft.setScreen(parent);
         }));
 
         //buttons from Selectionmanager
