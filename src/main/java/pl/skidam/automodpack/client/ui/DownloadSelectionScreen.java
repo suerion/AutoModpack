@@ -31,10 +31,10 @@ public class DownloadSelectionScreen extends VersionedScreen {
     @Override
     protected void init() {
         super.init();
-        assert this.client != null;
+        assert this.minecraft != null;
 
         this.addDrawableChild(buttonWidget(this.width / 2, this.height / 2 + 150, 120, 20, VersionedText.translatable("automodpack.ds.cancel"), button -> {
-            this.client.setScreen(parent);
+            this.minecraft.setScreen(parent);
         }));
 
         //buttons from Selectionmanager
