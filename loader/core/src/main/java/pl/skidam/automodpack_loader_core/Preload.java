@@ -231,6 +231,8 @@ public class Preload {
             if (knownHosts.hosts == null) {
                 knownHosts.hosts = new HashMap<>();
             }
+
+            importSeededKnownHosts();
         }
 
         try {
@@ -250,11 +252,47 @@ public class Preload {
             LOGGER.error("Failed to create private directory", e);
         }
 
-
         if (serverConfig == null || clientConfig == null) {
             throw new RuntimeException("Failed to load config!");
         }
 
         LOGGER.info("Loaded config! took {}ms", System.currentTimeMillis() - startTime);
+    }
+
+    // Merges admin-distributed pins (e.g. shipped inside a modpack zip alongside the mod)
+    // into the private known hosts. New hosts only - a distributed file must never replace
+    // a pin the user has already established.
+    private void importSeededKnownHosts() {
+        if (!Files.isRegularFile(knownHostsSeedFile)) {
+            return;
+        }
+
+        Jsons.KnownHostsFields seed = ConfigTools.softLoad(knownHostsSeedFile, Jsons.KnownHostsFields.class);
+        if (seed == null || seed.hosts == null || seed.hosts.isEmpty()) {
+            return;
+        }
+
+        int imported = 0;
+        for (Map.Entry<String, String> entry : seed.hosts.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) {
+                continue;
+            }
+
+            String host = entry.getKey().trim();
+            String fingerprint = entry.getValue().replace(":", "").replace(" ", "").toLowerCase(Locale.ROOT);
+            if (host.isEmpty() || !fingerprint.matches("[0-9a-f]{64}")) {
+                LOGGER.warn("Ignoring invalid entry in {}: {}", knownHostsSeedFile, entry.getKey());
+                continue;
+            }
+
+            if (knownHosts.hosts.putIfAbsent(host, fingerprint) == null) {
+                imported++;
+            }
+        }
+
+        if (imported > 0) {
+            ConfigTools.save(knownHostsFile, knownHosts);
+            LOGGER.info("Imported {} certificate pin(s) from {}", imported, knownHostsSeedFile);
+        }
     }
 }

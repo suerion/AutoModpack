@@ -12,6 +12,7 @@ import pl.skidam.automodpack.client.ui.versioned.VersionedText;
 import pl.skidam.automodpack_core.auth.SecretsStore;
 import pl.skidam.automodpack_core.config.ConfigTools;
 import pl.skidam.automodpack_core.config.Jsons;
+import java.util.Map;
 import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.util.Util;
@@ -56,6 +57,10 @@ public class Commands {
                                 .then(literal("fingerprint")
                                         .requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
                                         .executes(Commands::fingerprint)
+                                        .then(literal("export")
+                                                .requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
+                                                .executes(Commands::exportFingerprint)
+                                        )
                                 )
                         )
                         .then(literal("config")
@@ -89,6 +94,30 @@ public class Commands {
         } else {
             send(context, "Certificate fingerprint is not available. Make sure the server is running with TLS enabled.", ChatFormatting.RED, false);
         }
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    // Writes the distributable pin seed file. Admins ship it inside their modpack's
+    // automodpack folder so clients trust the server's certificate on first join
+    // (out-of-band: the player already trusts the pack download they installed).
+    private static int exportFingerprint(CommandContext<CommandSourceStack> context) {
+        String fingerprint = hostServer.getCertificateFingerprint();
+        if (fingerprint == null) {
+            send(context, "Certificate fingerprint is not available. Make sure the server is running with TLS enabled.", ChatFormatting.RED, false);
+            return Command.SINGLE_SUCCESS;
+        }
+
+        String host = serverConfig.addressToSend == null ? "" : serverConfig.addressToSend.trim();
+        if (host.isEmpty()) {
+            send(context, "Set addressToSend in the server config first - clients pin the certificate under that address.", ChatFormatting.RED, false);
+            return Command.SINGLE_SUCCESS;
+        }
+
+        Jsons.KnownHostsFields seed = new Jsons.KnownHostsFields();
+        seed.hosts = Map.of(host, fingerprint);
+        ConfigTools.save(knownHostsSeedFile, seed);
+        send(context, "Exported certificate pin to " + knownHostsSeedFile + " - ship this file inside your modpack's automodpack folder so clients trust this server on first join.", ChatFormatting.GREEN, false);
 
         return Command.SINGLE_SUCCESS;
     }
@@ -200,7 +229,7 @@ public class Commands {
     private static int about(CommandContext<CommandSourceStack> context) {
         send(context, "AutoModpack", ChatFormatting.GREEN, AM_VERSION, ChatFormatting.WHITE, false);
         send(context, "/automodpack generate", ChatFormatting.YELLOW, false);
-        send(context, "/automodpack host start/stop/restart/connections/fingerprint", ChatFormatting.YELLOW, false);
+        send(context, "/automodpack host start/stop/restart/connections/fingerprint [export]", ChatFormatting.YELLOW, false);
         send(context, "/automodpack config reload", ChatFormatting.YELLOW, false);
         return Command.SINGLE_SUCCESS;
     }

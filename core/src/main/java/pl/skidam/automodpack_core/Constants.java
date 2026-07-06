@@ -51,6 +51,9 @@ public class Constants {
     public static final Path privateDir = automodpackDir.resolve(".private");
     public static final Path serverSecretsFile = privateDir.resolve("automodpack-secrets.json");
     public static final Path knownHostsFile = privateDir.resolve("automodpack-known-hosts.json");
+    // Admin-distributable pin seed - shipped inside a modpack zip/mrpack, merged into the
+    // private known hosts on preload (new hosts only, never overwriting established pins)
+    public static final Path knownHostsSeedFile = automodpackDir.resolve("automodpack-known-hosts.json");
     public static final Path serverCertFile = privateDir.resolve("cert.crt");
     public static final Path serverPrivateKeyFile = privateDir.resolve("key.pem");
 
