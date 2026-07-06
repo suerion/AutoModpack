@@ -22,7 +22,7 @@ Tiers: **T0** foundations / must land first · **T1** headline, gates 5.0.0-beta
 | P1 blacklist subtree pruning | `perf/blacklist-subtree-pruning` | done, 5 unit tests |
 | D2 restart-loop breaker + named restart reasons | `feat/update-loop-breaker` | done |
 | S3 address-embedded pin + `/automodpack fingerprint` share string | `feat/address-embedded-pin` | done, 6 unit tests; needs live mixin verify (ServerAddress parseString/isValidAddress across versions) |
-| S1 online-mode auto-trust | `feat/online-mode-auto-trust` | done; mc26.2 uses pipeline "encrypt" handler check (isEncrypted removed) |
+| S1 online-mode auto-trust | ~~deleted~~ | REJECTED as unsound (see S1 note) — branch removed |
 | U2 server-side url prefetch (platforms APIs + FetchManager moved to core) | `feat/content-url-prefetch` | done |
 | U3 downloadModsOnlyFromPlatforms policy | `feat/content-url-prefetch` (stacked) | done |
 
@@ -99,12 +99,16 @@ The settled design (Discord 2026-02→04, "UI design by Flagan11"):
 The umbrella goal: **the fingerprint screen becomes a rare fallback, not the default
 first-join experience** — without weakening the trust model.
 
-- **S1. Online-mode auto-trust — S, biggest UX win/LOC.** Skidam's 2026-03-19 finding:
-  when the MC server is online-mode, the login-phase channel is Mojang-authenticated and
-  encrypted, so the fingerprint delivered in `HandshakeS2CPacket`'s DataPacket is already
-  trustworthy ⇒ auto-pin (TOFU via authenticated channel), skip the screen entirely.
-  Show a passive "pinned cert from server ✓" line instead. Offline-mode servers keep
-  today's flow. *This alone removes the screen for the majority of servers.*
+- **S1. ~~Online-mode auto-trust~~ — REJECTED (unsound).** Online-mode authenticates
+  the *client to the server* (`joinServer`/`hasJoined`), never the server to the client:
+  the client encrypts to whatever public key it is handed, so an on-path attacker can
+  terminate the session itself, pass `hasJoined` for its own connection, and deliver its
+  own fingerprint over a perfectly "encrypted" login channel. Channel encryption proves
+  non-tampering in transit to *whoever the endpoint is* — not the endpoint's identity,
+  which is the fingerprint's entire job. **Rule for all trust work: identity must be
+  anchored out-of-band** (CA cert, DNSSEC, typed address pin, admin-distributed files);
+  never derive cert trust from in-band game traffic. The UX goal S1 chased is instead
+  covered by S3 + S4 (both out-of-band).
 - **S2. DNSSEC TXT fingerprint — M.** Admin publishes
   `_automodpack.<server-domain>. TXT "v=amp1;fp=<sha256>"`. Client resolves with a
   DNSSEC-validating resolver (dnsjava `ValidatingResolver`, bundled root trust anchor;
@@ -316,7 +320,7 @@ first-join experience** — without weakening the trust model.
 
 | Milestone | Contents | Bar |
 |---|---|---|
-| **5.0.0-alpha** (internal/testers) | F1–F4, S5 stage 1, S1, S3, P1, P2 | autotester matrix green |
+| **5.0.0-alpha** (internal/testers) | F1–F4, S5 stage 1, S3, S4, P1, P2 | autotester matrix green |
 | **5.0.0-beta1** | G1 (groups+UI), U1+U2, M1+M2, S4, N2 | testers channel + real servers (Suerion, Mr.White, print(str(name)) volunteered infra before) |
 | **beta2..n** | N1 progressive (ALPN first, config-phase next), U3, U4, M3, S2, S5 stage 2, D1, D2, C1–C3 | zero regressions on 4.x-era autotester scenarios; velocity scenario green |
 | **5.0.0 stable** | L1, L2, U5, X1 docs, N3, N4 | 2 quiet beta weeks; support-thread rate visibly down |

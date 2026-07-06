@@ -51,9 +51,10 @@ Second-biggest theme, ~25 threads + recurring in #discussion.
   address and the host address (Skidam: "trust chain X→Y", Dec 2025), which trips everyone.
 - Fingerprint changes on cert renewal; nginx-TLS-offload setups make fingerprint retrieval
   confusing ("how do i get the new fingerprint, tls disabled on server end").
-- Key insight from Skidam (2026-03-19, #discussion): **TOFU fingerprint screen is not
-  needed when the server is online-mode** — the login-phase channel is already
-  Mojang-authenticated + encrypted.
+- ~~Idea floated 2026-03-19 (#discussion): skip the TOFU screen on online-mode servers~~ —
+  **later rejected as unsound**: online-mode authenticates the client to the server, never
+  the server to the client, so the encrypted login channel cannot vouch for server identity
+  (see roadmap S1).
 - The `address;fingerprint` idea originated 2025-10-15 in "Can't get certificate to work."
 
 GitHub: #488 (fingerprint not saved between sessions — NeoForge), #447 (closed: SSH-like
