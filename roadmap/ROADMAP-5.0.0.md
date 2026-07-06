@@ -22,6 +22,7 @@ Tiers: **T0** foundations / must land first · **T1** headline, gates 5.0.0-beta
 | P1 blacklist subtree pruning | `perf/blacklist-subtree-pruning` | done, 5 unit tests |
 | D2 restart-loop breaker + named restart reasons | `feat/update-loop-breaker` | done |
 | S3 address-embedded pin + `/automodpack fingerprint` share string | `feat/address-embedded-pin` | done, 6 unit tests; needs live mixin verify (ServerAddress parseString/isValidAddress across versions) |
+| S4a admin-distributable pin seed + `/automodpack host fingerprint export` | `feat/seedable-known-hosts` | done; seed `automodpack/automodpack-known-hosts.json` merged on preload (new hosts only); compile-verified 1.18.2 + 26.2, no live test yet |
 | S1 online-mode auto-trust | ~~deleted~~ | REJECTED as unsound (see S1 note) — branch removed |
 | U2 server-side url prefetch (platforms APIs + FetchManager moved to core) | `feat/content-url-prefetch` | done |
 | U3 downloadModsOnlyFromPlatforms policy | `feat/content-url-prefetch` (stacked) | done |
