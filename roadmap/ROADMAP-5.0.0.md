@@ -14,6 +14,22 @@ Sizes: **S** ≤ 2 days · **M** ≤ 2 weeks · **L** multi-week.
 Tiers: **T0** foundations / must land first · **T1** headline, gates 5.0.0-beta ·
 **T2** should ship during the beta cycle · **T3** stretch / may slip to 5.1.
 
+## Implementation status (branches pushed, no PRs yet — 2026-07-06)
+
+| Item | Branch | State |
+|---|---|---|
+| S5 stage 1 (multi-secret + sliding expiry + 90d default + friendly expiry) | `feat/secrets-v2` | done, 8 unit tests |
+| P1 blacklist subtree pruning | `perf/blacklist-subtree-pruning` | done, 5 unit tests |
+| D2 restart-loop breaker + named restart reasons | `feat/update-loop-breaker` | done |
+| S3 address-embedded pin + `/automodpack fingerprint` share string | `feat/address-embedded-pin` | done, 6 unit tests; needs live mixin verify (ServerAddress parseString/isValidAddress across versions) |
+| S1 online-mode auto-trust | `feat/online-mode-auto-trust` | done; mc26.2 uses pipeline "encrypt" handler check (isEncrypted removed) |
+| U2 server-side url prefetch (platforms APIs + FetchManager moved to core) | `feat/content-url-prefetch` | done |
+| U3 downloadModsOnlyFromPlatforms policy | `feat/content-url-prefetch` (stacked) | done |
+
+All branches compile on 1.18.2/1.20.1/26.x fabric+forge+neoforge; `:core:test` green.
+Next up: run autotester scenarios per branch, then merge in order: secrets-v2 →
+pruning → loop-breaker → content-url-prefetch → address-pin → online-mode-auto-trust.
+
 ---
 
 ## 0. Already on `main` (banked for 5.0.0)
