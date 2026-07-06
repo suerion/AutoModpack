@@ -86,6 +86,21 @@ public class Commands {
                     .withClickEvent(new ClickEvent(ClickEvent.Action.COPY_TO_CLIPBOARD, fingerprint)));
             *//*?}*/
             send(context, "Certificate fingerprint", ChatFormatting.WHITE, fingerprintText, ChatFormatting.YELLOW, false);
+
+            // Ready-to-share string: players paste it as the server address and the pin applies
+            // automatically, no fingerprint screen (see ServerAddressMixin/AddressPins).
+            String shareAddress = (serverConfig.addressToSend == null || serverConfig.addressToSend.isBlank())
+                    ? "<your-server-address>" : serverConfig.addressToSend;
+            String shareString = shareAddress + ";" + fingerprint;
+            MutableComponent shareText = VersionedText.literal(shareString).withStyle(style -> style
+                    /*? if >=1.21.5 {*/
+                    .withHoverEvent(new HoverEvent.ShowText(VersionedText.translatable("chat.copy.click")))
+                    .withClickEvent(new ClickEvent.CopyToClipboard(shareString)));
+                     /*?} else {*/
+                    /*.withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, VersionedText.translatable("chat.copy.click")))
+                    .withClickEvent(new ClickEvent(ClickEvent.Action.COPY_TO_CLIPBOARD, shareString)));
+            *//*?}*/
+            send(context, "Players can use this as the server address to skip fingerprint verification", ChatFormatting.WHITE, shareText, ChatFormatting.GREEN, false);
         } else {
             send(context, "Certificate fingerprint is not available. Make sure the server is running with TLS enabled.", ChatFormatting.RED, false);
         }
