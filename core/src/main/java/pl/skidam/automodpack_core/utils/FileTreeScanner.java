@@ -16,6 +16,9 @@ public class FileTreeScanner {
     private final List<PathMatcher> whiteListMatchers = new ArrayList<>();
     private final List<PathMatcher> blackListMatchers = new ArrayList<>();
     private final List<PruningRule> pruningRules = new ArrayList<>();
+    // Directories whose entire subtree is blacklisted ("!X/**") - traversal skips them wholesale,
+    // so a huge excluded folder (e.g. a 70GB bluemap dir) costs nothing instead of a full walk.
+    private final List<PathMatcher> blacklistSubtreeMatchers = new ArrayList<>();
     private final Set<Path> startDirectories;
     private final FileSystem fs;
     private final boolean isCaseInsensitive;
@@ -108,6 +111,17 @@ public class FileTreeScanner {
                 }
             }
 
+            // Optimization: skip subtrees that are entirely blacklisted - every file inside
+            // would be discarded by the blacklist check in visitFile anyway
+            if (!blacklistSubtreeMatchers.isEmpty()) {
+                try {
+                    if (isSubtreeBlacklisted(startDir.relativize(dir))) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
+                } catch (IllegalArgumentException ignored) {
+                }
+            }
+
             return FileVisitResult.CONTINUE;
         }
 
@@ -153,6 +167,15 @@ public class FileTreeScanner {
         }
     }
 
+    // package-private for tests
+    boolean isSubtreeBlacklisted(Path relativeDir) {
+        int size = blacklistSubtreeMatchers.size();
+        for (int i = 0; i < size; i++) {
+            if (blacklistSubtreeMatchers.get(i).matches(relativeDir)) return true;
+        }
+        return false;
+    }
+
     // =================================================================================
     // RULE PARSING & GLOB LOGIC
     // =================================================================================
@@ -173,6 +196,14 @@ public class FileTreeScanner {
                 PathMatcher matcher = fs.getPathMatcher("glob:" + clean);
                 if (isBlacklist) {
                     blackListMatchers.add(matcher);
+                    // "X/**" excludes everything below X, so directories matching X can be pruned.
+                    // Patterns with a suffix after the ** (e.g. "X/**/*.png") must keep walking.
+                    if (clean.endsWith("/**")) {
+                        String prefix = clean.substring(0, clean.length() - 3);
+                        if (!prefix.isEmpty() && !prefix.endsWith("**")) {
+                            blacklistSubtreeMatchers.add(fs.getPathMatcher("glob:" + prefix));
+                        }
+                    }
                 } else {
                     whiteListMatchers.add(matcher);
                     // Add collapsed variant for "foo/**/bar" -> "foo/bar" boundary cases
