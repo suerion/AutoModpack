@@ -20,6 +20,7 @@
     "core.ClientLoginNetworkHandlerMixin",
     "core.ConnectScreenMixin",
     "core.MusicTrackerMixin",
+    "core.ServerAddressMixin",
     "dev.MinecraftMixin",
     "dev.ResourceLoadStateTrackerMixin"
   ],

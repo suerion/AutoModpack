@@ -1,6 +1,7 @@
 package pl.skidam.automodpack_loader_core.client;
 
 import org.jetbrains.annotations.NotNull;
+import pl.skidam.automodpack_core.auth.AddressPins;
 import pl.skidam.automodpack_core.auth.Secrets;
 import pl.skidam.automodpack_core.config.ConfigTools;
 import pl.skidam.automodpack_core.config.Jsons;
@@ -669,7 +670,7 @@ public class ModpackUtils {
                     modpackAddresses,
                     secret,
                     operation,
-                    blockingValidationCallback(modpackAddresses.hostAddress, allowAskingUser)
+                    blockingValidationCallback(modpackAddresses, allowAskingUser)
             ).get();
         } catch (Exception e) {
             LOGGER.error("Error while getting server modpack content", e);
@@ -691,14 +692,42 @@ public class ModpackUtils {
     }
 
     /**
+     * Checks the certificate against a fingerprint the player embedded in the typed server
+     * address ("host;fingerprint"), if there is one. A match is persisted to known hosts so
+     * later sessions don't need the suffix; a mismatch fails closed - no fallback prompt,
+     * because the player explicitly stated what the certificate must be.
+     *
+     * @return empty when no pin was supplied for this connection
+     */
+    private static Optional<Boolean> checkAddressPin(Jsons.ModpackAddresses addresses, String fingerprint) {
+        if (addresses.serverAddress == null)
+            return Optional.empty();
+        var pin = AddressPins.getPin(addresses.serverAddress.getHostString());
+        if (pin.isEmpty())
+            return Optional.empty();
+
+        String hostKey = addresses.hostAddress.getHostString();
+        if (pin.get().equalsIgnoreCase(fingerprint)) {
+            knownHosts.hosts.put(hostKey, fingerprint);
+            ConfigTools.save(knownHostsFile, knownHosts);
+            LOGGER.info("Certificate of {} matches the fingerprint embedded in the server address - trusted", hostKey);
+            return Optional.of(true);
+        }
+
+        LOGGER.error("Certificate of {} does NOT match the fingerprint embedded in the server address! Expected {} but got {} - refusing to connect.", hostKey, pin.get(), fingerprint);
+        return Optional.of(false);
+    }
+
+    /**
      * Returns a callback for use with {@link DownloadClient} that checks for trusted fingerprints in the known hosts
      * list of the client config.
      *
-     * @param address         the address being connected to
+     * @param addresses       the modpack host + minecraft server addresses being connected to
      * @param allowAskingUser whether the user should be prompted if a certificate is not trusted
      * @return the callback
      */
-    public static Function<X509Certificate, Boolean> userValidationCallback(InetSocketAddress address, boolean allowAskingUser) {
+    public static Function<X509Certificate, Boolean> userValidationCallback(Jsons.ModpackAddresses addresses, boolean allowAskingUser) {
+        InetSocketAddress address = addresses.hostAddress;
         return certificate -> {
             String fingerprint;
             try {
@@ -708,6 +737,9 @@ public class ModpackUtils {
             }
             if (Objects.equals(knownHosts.hosts.get(address.getHostString()), fingerprint))
                 return true;
+            var pinResult = checkAddressPin(addresses, fingerprint);
+            if (pinResult.isPresent())
+                return pinResult.get();
             LOGGER.warn("Received untrusted certificate from server {}!", address.getHostString());
             if (allowAskingUser) {
                 boolean trusted = askUserAboutCertificate(address, fingerprint);
@@ -763,7 +795,7 @@ public class ModpackUtils {
 
         return fetchModpackContentAsync(modpackAddresses, secret,
                 (client) -> client.downloadFile(new byte[0], modpackContentTempFile, null),
-                userValidationCallbackAsync(modpackAddresses.hostAddress, allowAskingUser));
+                userValidationCallbackAsync(modpackAddresses, allowAskingUser));
     }
 
     private static CompletableFuture<Optional<Jsons.ModpackContentFields>> fetchModpackContentAsync(
@@ -816,12 +848,13 @@ public class ModpackUtils {
                 });
     }
 
-    private static Function<X509Certificate, CompletableFuture<Boolean>> blockingValidationCallback(InetSocketAddress address, boolean allowAskingUser) {
-        Function<X509Certificate, Boolean> callback = userValidationCallback(address, allowAskingUser);
+    private static Function<X509Certificate, CompletableFuture<Boolean>> blockingValidationCallback(Jsons.ModpackAddresses addresses, boolean allowAskingUser) {
+        Function<X509Certificate, Boolean> callback = userValidationCallback(addresses, allowAskingUser);
         return certificate -> CompletableFuture.completedFuture(callback.apply(certificate));
     }
 
-    public static Function<X509Certificate, CompletableFuture<Boolean>> userValidationCallbackAsync(InetSocketAddress address, boolean allowAskingUser) {
+    public static Function<X509Certificate, CompletableFuture<Boolean>> userValidationCallbackAsync(Jsons.ModpackAddresses addresses, boolean allowAskingUser) {
+        InetSocketAddress address = addresses.hostAddress;
         return certificate -> {
             String fingerprint;
             try {
@@ -831,6 +864,9 @@ public class ModpackUtils {
             }
             if (Objects.equals(knownHosts.hosts.get(address.getHostString()), fingerprint))
                 return CompletableFuture.completedFuture(true);
+            var pinResult = checkAddressPin(addresses, fingerprint);
+            if (pinResult.isPresent())
+                return CompletableFuture.completedFuture(pinResult.get());
             LOGGER.warn("Received untrusted certificate from server {}!", address.getHostString());
             if (allowAskingUser) {
                 return askUserAboutCertificateAsync(address, fingerprint);
