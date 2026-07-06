@@ -24,7 +24,7 @@ Tiers: **T0** foundations / must land first · **T1** headline, gates 5.0.0-beta
 | S3 address-embedded pin + `/automodpack fingerprint` share string | `feat/address-embedded-pin` | done, 6 unit tests; needs live mixin verify (ServerAddress parseString/isValidAddress across versions) |
 | S4a admin-distributable pin seed + `/automodpack host fingerprint export` | `feat/seedable-known-hosts` | done; seed `automodpack/automodpack-known-hosts.json` merged on preload (new hosts only); compile-verified 1.18.2 + 26.2, no live test yet |
 | S2 DNS TXT pin (DoH dual-resolver, DNSSEC AD required) + `/automodpack host fingerprint dns` | `feat/dns-txt-pin` | done; 6 unit tests written NOT run; compile-verified 1.18.2 + 26.2; needs live test against a real DNSSEC zone |
-| N2 `/automodpack host doctor` (config checklist + client-identical self-dial with cert compare) | `feat/host-doctor` | done; compile-verified 1.18.2 + 26.2; client-side doctor + auto-run-on-host-error still TODO |
+| N2 `/automodpack host doctor` (config checklist + client-identical self-dial with cert compare) | `feat/host-doctor` | done incl. auto-run to server log when hosting fails at boot; compile-verified 1.18.2 + 26.2; client-side doctor still TODO |
 | U6 changelog authoring (`host-modpack/changelog.md` → content json → top of changelog screen; `/automodpack changelog [set/clear]`) | `feat/changelog-authoring` | done; compile-verified 1.18.2 + 26.2; screen rendering not visually verified |
 | S1 online-mode auto-trust | ~~deleted~~ | REJECTED as unsound (see S1 note) — branch removed |
 | U2 server-side url prefetch (platforms APIs + FetchManager moved to core) | `feat/content-url-prefetch` | done |
