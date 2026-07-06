@@ -23,6 +23,7 @@ Tiers: **T0** foundations / must land first · **T1** headline, gates 5.0.0-beta
 | D2 restart-loop breaker + named restart reasons | `feat/update-loop-breaker` | done |
 | S3 address-embedded pin + `/automodpack fingerprint` share string | `feat/address-embedded-pin` | done, 6 unit tests; needs live mixin verify (ServerAddress parseString/isValidAddress across versions) |
 | S4a admin-distributable pin seed + `/automodpack host fingerprint export` | `feat/seedable-known-hosts` | done; seed `automodpack/automodpack-known-hosts.json` merged on preload (new hosts only); compile-verified 1.18.2 + 26.2, no live test yet |
+| S2 DNS TXT pin (DoH dual-resolver, DNSSEC AD required) + `/automodpack host fingerprint dns` | `feat/dns-txt-pin` | done; 6 unit tests written NOT run; compile-verified 1.18.2 + 26.2; needs live test against a real DNSSEC zone |
 | S1 online-mode auto-trust | ~~deleted~~ | REJECTED as unsound (see S1 note) — branch removed |
 | U2 server-side url prefetch (platforms APIs + FetchManager moved to core) | `feat/content-url-prefetch` | done |
 | U3 downloadModsOnlyFromPlatforms policy | `feat/content-url-prefetch` (stacked) | done |
@@ -111,11 +112,14 @@ first-join experience** — without weakening the trust model.
   never derive cert trust from in-band game traffic. The UX goal S1 chased is instead
   covered by S3 + S4 (both out-of-band).
 - **S2. DNSSEC TXT fingerprint — M.** Admin publishes
-  `_automodpack.<server-domain>. TXT "v=amp1;fp=<sha256>"`. Client resolves with a
-  DNSSEC-validating resolver (dnsjava `ValidatingResolver`, bundled root trust anchor;
-  we already stopped relying on platform DNS — f9894c73). Validated ⇒ auto-pin.
-  Not validated (no DNSSEC) ⇒ treat as hint only: prefill the screen, still require
-  confirm. Server side: `/automodpack fingerprint dns` prints the exact record to paste.
+  `_automodpack.<server-domain>. TXT "v=amp1;fp=<sha256>"`. Client fetches it over
+  DNS-over-HTTPS from two independent resolvers (Cloudflare + Google) and honors it only
+  when BOTH report DNSSEC validation (`AD` flag) and agree — trust anchored in WebPKI +
+  the zone's DNSSEC chain, no dnsjava/validating-resolver dependency (~2MB saved; local
+  validation with a bundled trust anchor stays a possible later upgrade). Validated match
+  ⇒ auto-pin; validated MISMATCH ⇒ fail closed without asking; no/unvalidated record ⇒
+  today's manual flow. Server side: `/automodpack host fingerprint dns` prints the exact
+  record to paste.
 - **S3. Address-embedded pin — S.** `play.example.com:25565;<fp>` accepted anywhere a
   server address is entered (idea born 2025-10-15). Parse & strip in the address-resolution
   mixin before vanilla sees it; pin the fingerprint for that host. Admins hand out one
