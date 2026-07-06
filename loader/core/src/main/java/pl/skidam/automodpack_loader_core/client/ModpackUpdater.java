@@ -7,6 +7,7 @@ import pl.skidam.automodpack_core.config.ConfigTools;
 import pl.skidam.automodpack_core.config.Jsons;
 import pl.skidam.automodpack_core.protocol.DownloadClient;
 import pl.skidam.automodpack_core.utils.FileInspection;
+import pl.skidam.automodpack_core.utils.HashUtils;
 import pl.skidam.automodpack_core.utils.LegacyClientCacheUtils;
 import pl.skidam.automodpack_core.utils.SmartFileUtils;
 import pl.skidam.automodpack_core.utils.cache.FileMetadataCache;
@@ -16,6 +17,7 @@ import pl.skidam.automodpack_loader_core.ReLauncher;
 import pl.skidam.automodpack_loader_core.screen.ScreenManager;
 import pl.skidam.automodpack_loader_core.utils.DownloadManager;
 import pl.skidam.automodpack_loader_core.utils.FetchManager;
+import pl.skidam.automodpack_loader_core.utils.UpdateLoopDetector;
 import pl.skidam.automodpack_loader_core.utils.UpdateType;
 
 import java.io.IOException;
@@ -144,13 +146,38 @@ public class ModpackUpdater {
         boolean requiresRestart = applyModpack(cache);
 
         if (requiresRestart) {
+            String fingerprint = updateStateFingerprint();
+            if (UpdateLoopDetector.isLooping(fingerprint)) {
+                // Restarting a third time for the exact same state would just loop forever.
+                LOGGER.error("Restart loop detected! The modpack keeps requiring a restart without converging.");
+                LOGGER.error("See the \"Restart required because\" line above for what keeps changing - a file there is most likely corrupted on the server or being modified by something else on this machine.");
+                LOGGER.error("Booting without applying the modpack. If this keeps happening, please report it: https://github.com/Skidamek/AutoModpack/issues");
+                new ScreenManager().error("automodpack.error.critical", "Restart loop detected - check the logs", "automodpack.error.logs");
+                return;
+            }
+
+            UpdateLoopDetector.recordRestart(fingerprint);
             LOGGER.info("Modpack is not loaded");
             UpdateType updateType = fullDownload ? UpdateType.FULL : UpdateType.UPDATE;
             new ReLauncher(modpackDir, updateType, changelogs).restart(true);
             return;
         }
 
+        UpdateLoopDetector.clear();
         loadModpackMods(cache);
+    }
+
+    // Identifies "the same update state" across boots for loop detection: same modpack and
+    // same server content. A genuine new server update changes the hash and resets the loop.
+    private String updateStateFingerprint() {
+        String contentHash = "no-content";
+        try {
+            if (Files.exists(modpackContentFile)) {
+                contentHash = HashUtils.getHash(modpackContentFile);
+            }
+        } catch (Exception ignored) {
+        }
+        return modpackDir.getFileName() + ":" + contentHash;
     }
 
     // Load the modpack mods that aren't already present in the standard mods
@@ -543,7 +570,19 @@ public class ModpackUpdater {
 
         boolean needsRestart6 = LauncherVersionSwapper.swapLoaderVersion(modpackContent.loader, modpackContent.loaderVersion);
 
-        return needsRestart0 || needsRestart1 || needsRestart2 || needsRestart3 || needsRestart4 || needsRestart5 || needsRestart6;
+        List<String> restartReasons = new ArrayList<>();
+        if (needsRestart0) restartReasons.add("deleted files removed by the server");
+        if (needsRestart1) restartReasons.add("files moved to their correct locations");
+        if (needsRestart2) restartReasons.add("nested mod conflicts fixed");
+        if (needsRestart3) restartReasons.add("duplicated mods removed");
+        if (needsRestart4) restartReasons.add("mods removed from the standard mods folder");
+        if (needsRestart5) restartReasons.add("files deleted on server's request");
+        if (needsRestart6) restartReasons.add("mod loader version changed");
+        if (!restartReasons.isEmpty()) {
+            LOGGER.info("Restart required because: {}", String.join(", ", restartReasons));
+        }
+
+        return !restartReasons.isEmpty();
     }
 
     // Returns the modpack mods that ship a service file this loader's running version cannot host
