@@ -1,0 +1,30 @@
+{
+  "server-config.mdx": {
+    "name": "Server Configuration",
+    "icon": null
+  },
+  "client-config.mdx": {
+    "name": "Client Configuration",
+    "icon": null
+  },
+  "network-settings.mdx": {
+    "name": "Network Settings",
+    "icon": null
+  },
+  "security.mdx": {
+    "name": "Security",
+    "icon": null
+  },
+  "synced-files.mdx": {
+    "name": "Synced Files",
+    "icon": null
+  },
+  "allow-edits-in-files.mdx": {
+    "name": "Allow Edits in Files",
+    "icon": null
+  },
+  "force-copy-files.mdx": {
+    "name": "Force Copy Files",
+    "icon": null
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "commands.mdx": {
+    "name": "Commands",
+    "icon": null
+  },
+  "configuration-examples.mdx": {
+    "name": "Configuration Examples",
+    "icon": null
+  },
+  "folder-structure.mdx": {
+    "name": "Folder Structure",
+    "icon": null
+  },
+  "wildcards.mdx": {
+    "name": "Wildcards",
+    "icon": null
+  }
+}

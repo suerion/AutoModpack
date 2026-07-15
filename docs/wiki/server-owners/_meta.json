@@ -1,0 +1,22 @@
+{
+  "installation.mdx": {
+    "name": "Installation",
+    "icon": null
+  },
+  "creating-your-first-modpack.mdx": {
+    "name": "Creating your first Modpack",
+    "icon": null
+  },
+  "how-to-update-modpack.mdx": {
+    "name": "How to Update the Modpack",
+    "icon": null
+  },
+  "testing-the-modpack.mdx": {
+    "name": "Test the Modpack",
+    "icon": null
+  },
+  "faq.mdx": {
+    "name": "FAQ",
+    "icon": null
+  }
+}

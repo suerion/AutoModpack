@@ -1,0 +1,46 @@
+{
+  "getting-started": {
+    "name": "Getting Started",
+    "icon": null
+  },
+  "players": {
+    "name": "Players",
+    "icon": null
+  },
+  "server-owners": {
+    "name": "Server Owners",
+    "icon": null
+  },
+  "guides": {
+    "name": "Guides",
+    "icon": null
+  },
+  "troubleshooting": {
+    "name": "Troubleshooting",
+    "icon": null
+  },
+  "configuration": {
+    "name": "Configuration",
+    "icon": null
+  },
+  "proxies": {
+    "name": "Proxies",
+    "icon": null
+  },
+  "compatibility": {
+    "name": "Compatibility",
+    "icon": null
+  },
+  "faq": {
+    "name": "FAQ",
+    "icon": null
+  },
+  "references": {
+    "name": "References",
+    "icon": null
+  },
+  "technical-details": {
+    "name": "Technical Details",
+    "icon": null
+  }
+}

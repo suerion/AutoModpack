@@ -1,0 +1,22 @@
+{
+  "client-only-mods.mdx": {
+    "name": "Client-only Mods",
+    "icon": null
+  },
+  "server-only-mods.mdx": {
+    "name": "Server-only Mods",
+    "icon": null
+  },
+  "config-files.mdx": {
+    "name": "Config Files",
+    "icon": null
+  },
+  "resource-packs.mdx": {
+    "name": "Resource Packs",
+    "icon": null
+  },
+  "shader-packs.mdx": {
+    "name": "Shader Packs",
+    "icon": null
+  }
+}
