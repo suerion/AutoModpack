@@ -1,0 +1,22 @@
+{
+  "launchers.mdx": {
+    "name": "Launchers",
+    "icon": null
+  },
+  "minecraft-versions.mdx": {
+    "name": "Minecraft Versions",
+    "icon": null
+  },
+  "mods.mdx": {
+    "name": "Mods",
+    "icon": null
+  },
+  "hosting-providers.mdx": {
+    "name": "Hosting Providers",
+    "icon": null
+  },
+  "proxies.mdx": {
+    "name": "Proxies",
+    "icon": null
+  }
+}

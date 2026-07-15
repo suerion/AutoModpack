@@ -1,0 +1,38 @@
+{
+  "download-wont-start.mdx": {
+    "name": "Download won't start",
+    "icon": null
+  },
+  "modpack-doesnt-update.mdx": {
+    "name": "Modpack does not Update",
+    "icon": null
+  },
+  "host-server-error.mdx": {
+    "name": "Host Server Error",
+    "icon": null
+  },
+  "whitelist-problems.mdx": {
+    "name": "Whitelist Problems",
+    "icon": null
+  },
+  "launcher-problems.mdx": {
+    "name": "Launcher Problems",
+    "icon": null
+  },
+  "proxy-problems.mdx": {
+    "name": "Proxy Problems",
+    "icon": null
+  },
+  "certificate-problems.mdx": {
+    "name": "Certificate Problems",
+    "icon": null
+  },
+  "collecting-logs.mdx": {
+    "name": "Collecting Logs",
+    "icon": null
+  },
+  "faq.mdx": {
+    "name": "FAQ",
+    "icon": null
+  }
+}
