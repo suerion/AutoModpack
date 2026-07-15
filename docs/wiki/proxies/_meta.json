@@ -11,6 +11,10 @@
     "name": "Backend Configuration",
     "icon": null
   },
+  "modern-forwarding.mdx": {
+    "name": "Modern Forwarding",
+    "icon": null
+  },
   "multiple-backend-servers.mdx": {
     "name": "Multiple Backend Servers",
     "icon": null
