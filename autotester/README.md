@@ -32,13 +32,13 @@ uv --project autotester run autotester build-images
 Run one target:
 
 ```bash
-uv --project autotester run autotester run --target 1.21.11-fabric --scenario download-only
+uv --project autotester run autotester run --target 1.21.11-fabric --scenario download-only --jobs 3
 ```
 
 Run the full default matrix:
 
 ```bash
-uv --project autotester run autotester run --target all --scenario sync --jobs 1
+uv --project autotester run autotester run --target all --scenario sync --jobs 3
 ```
 
 Clean generated output:
@@ -87,18 +87,14 @@ The client image builds its HeadlessMC launcher from the git repo and ref in
 
 ```yaml
 headlessmc:
-  repo: "https://github.com/Skidamek/headlessmc.git"
-  ref: "64d3c126e72bbfccf95e71afaa6536f50bc64097"  # branch, tag, or commit SHA
+  repo: "https://github.com/headlesshq/headlessmc.git"
+  ref: "2.10.0"  # branch, tag, or commit SHA
 ```
 
-`ref` may be a branch, tag, or commit SHA; it is pinned to a SHA here for
-reproducible image builds. This default ref carries the patch required to launch
-**MC 26.2** headlessly
-(stock HeadlessMC can't yet — its LWJGL stubs don't satisfy 26.2's new render
-backend); it does not change behavior on other versions. Point `repo`/`ref` at
-any other HeadlessMC build and rebuild the image
-(`uv --project autotester run autotester build-images`). If they are unset, the
-build falls back to upstream HeadlessMC (`headlesshq/headlessmc`).
+`ref` may be a branch, tag, or commit SHA; the default uses the immutable
+upstream 2.10.0 release for reproducible image builds and Minecraft 26.2
+support. Point `repo`/`ref` at another HeadlessMC build and rebuild the image
+with `uv --project autotester run autotester build-images`.
 
 ## Scenarios
 
@@ -155,7 +151,7 @@ Three scenario-header keys decouple *how* a scenario runs from *what* it tests:
 `mode: client-only` is the fast loader-debugging path: stage a modpack, boot just
 the client, and assert on the launch log — seconds per iteration instead of a
 multi-minute gameplay round trip. The `stage_modpack` verb lays the modpack into
-`automodpack/modpacks/<name>/` and writes a client config that selects it with
+`automodpack/modpacks/<modpackId>/` and writes a client config that selects it with
 `updateSelectedModpackOnLaunch=false`, so the client loads it on boot without
 contacting a server:
 
@@ -171,17 +167,16 @@ flow:
       log:
         matches_all: [ 'Prelaunching AutoModpack', 'AutoModpack prelaunched' ]
         not_matches: [ 'ClassNotFoundException' ]
-  - do: wait_exit                 # tolerate a later headless crash OR a GPU idle
-    expect: any
-    or_alive: true
+  - use: finish_client_only       # best-effort quit; cleanup handles a crashed client
 ```
 
 `stage_modpack` accepts `from:` (a ready modpack dir to copy wholesale), `mods:`
 (extra jars to drop into the pack's `mods/`), and `config:` (extra client-config
 overrides). **`from:` and `mods:` paths resolve against the repo root** (the
-parent of `autotester/`) unless absolute. The combination of whole-log assertions
-and `wait_exit: { expect: any, or_alive: true }` makes "verify it loaded, don't
-care what happens at render" robust on both headless and GPU hosts. See
+parent of `autotester/`) unless absolute. `manifest: true` derives a local
+`automodpack-content.json` from the final staged files for reconciliation tests.
+Whole-log assertions followed by `finish_client_only` make "verify it loaded, then
+stop immediately" robust on both headless and GPU hosts. See
 `scenarios/client-loads-offline.yaml`.
 
 ### Discovering verbs and validating scenarios
@@ -190,6 +185,7 @@ care what happens at render" robust on both headless and GPU hosts. See
 autotester verbs                       # list verbs + condition keys (from the registry)
 autotester validate                    # statically check every scenario
 autotester validate --scenario sync    # check one
+autotester targets --scenario sync     # print the in-scope target IDs as JSON
 ```
 
 `validate` expands macros and checks that every verb/macro name resolves and
@@ -276,7 +272,7 @@ Targeting `file:` lets you assert on the rich evidence in `logs/debug.log`
 ### Templating and variables
 
 Strings expand `${...}` against the scenario context: `${target.id}`,
-`${server.host}`, `${modpack}`, `${marker}`, plus any captured variables. The
+`${server.host}` (the complete `host:port` address), `${modpack}`, `${marker}`, plus any captured variables. The
 `log` condition can capture regex groups into variables for later steps:
 
 ```yaml
@@ -358,16 +354,19 @@ step is preserved.
 
 ## CI Workflow
 
-`.github/workflows/ingame-tests.yml` is manual (`workflow_dispatch`). It builds
-the normal project artifacts, builds the autotest client image, runs the chosen
-target/scenario matrix, uploads per-target logs, and publishes an aggregate
-summary.
+`.github/workflows/ingame-tests.yml` is manual (`workflow_dispatch`). It selects
+the target/scenario matrix first, then each test job builds only its own
+instrumented target locally. Instrumented jars are never uploaded as workflow
+artifacts. The workflow builds and briefly transfers one shared autotest client
+image, uploads per-target logs, and publishes an aggregate summary.
 
 ## Bridge
 
-The bridge is disabled unless the JVM property `automodpack.autotest=true` is
-present. Test containers pass a per-run token and game directory through JVM
-properties. Commands and responses are JSON files under:
+The bridge and its dev mixins exist only in jars built with
+`-Pautomodpack.autotest`; normal release jars exclude their classes and mixin
+entries. Instrumented jars apply the dev mixins directly, while the bridge still
+requires the per-run token and game-directory JVM properties supplied by the test
+container. Commands and responses are JSON files under:
 
 ```text
 <gameDir>/automodpack/autotest/

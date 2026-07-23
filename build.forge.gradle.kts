@@ -1,6 +1,7 @@
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.databind.node.ObjectNode
+import java.util.Locale
 
 plugins {
 	kotlin("jvm")
@@ -9,14 +10,20 @@ plugins {
 	id("net.neoforged.moddev.legacyforge")
 }
 
+val targetName = sc.current.project
+val minecraftVersion = property("deps.minecraft") as String
+val selectedForgeVersion = property("deps.forge") as String
+val mixinExtrasVersion = versionProperty("versionMixinExtras")
+val mixinVersion = versionProperty("versionMixin")
+
 version = "${property("mod_version")}"
 group = "${property("mod.group")}"
-base.archivesName.set("${property("mod_name")}-mc${property("deps.minecraft")}-forge".lowercase())
+base.archivesName.set("${property("mod_name")}-mc$targetName".lowercase(Locale.ROOT))
 
 legacyForge {
 	validateAccessTransformers = true
 	enable {
-		forgeVersion = property("deps.forge") as String
+		forgeVersion = selectedForgeVersion
 		isDisableRecompilation = true
 	}
 }
@@ -25,7 +32,10 @@ dependencies {
 	implementation(project(":core")) { isTransitive = false }
 	implementation(project(":loader-core")) { isTransitive = false }
 
-	annotationProcessor("org.spongepowered:mixin:0.8.5:processor") // Required to generate refmaps
+	compileOnly(annotationProcessor("io.github.llamalad7:mixinextras-common:$mixinExtrasVersion")!!)
+	implementation(jarJar("io.github.llamalad7:mixinextras-forge:$mixinExtrasVersion")!!)
+
+	annotationProcessor("org.spongepowered:mixin:$mixinVersion:processor") // Required to generate refmaps
 }
 
 mixin {

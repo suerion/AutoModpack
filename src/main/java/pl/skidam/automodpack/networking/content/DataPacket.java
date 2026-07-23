@@ -5,17 +5,15 @@ import com.google.gson.Gson;
 import pl.skidam.automodpack_core.auth.Secrets;
 
 public class DataPacket {
-	public String address;
-	public int port;
-	public String modpackName;
+	public String endpointHost;
+	public int endpointPort;
 	public Secrets.Secret secret;
 	public boolean modRequired;
 	public boolean requiresMagic;
 
-	public DataPacket(String address, int port, String modpackName, Secrets.Secret secret, boolean modRequired, boolean requiresMagic) {
-		this.address = address;
-		this.port = port;
-		this.modpackName = modpackName;
+	public DataPacket(String endpointHost, int endpointPort, Secrets.Secret secret, boolean modRequired, boolean requiresMagic) {
+		this.endpointHost = endpointHost;
+		this.endpointPort = endpointPort;
 		this.secret = secret;
 		this.modRequired = modRequired;
 		this.requiresMagic = requiresMagic;

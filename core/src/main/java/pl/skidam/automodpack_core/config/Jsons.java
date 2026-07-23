@@ -5,6 +5,8 @@ import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.google.gson.annotations.SerializedName;
+
 import pl.skidam.automodpack_core.auth.Secrets;
 
 @SuppressWarnings("unused")
@@ -14,51 +16,53 @@ public class Jsons {
 		public int DO_NOT_CHANGE_IT = 0; // file version
 	}
 
-	public static class ClientConfigFieldsV1 {
-		public int DO_NOT_CHANGE_IT = 1; // file version
-		public String selectedModpack = ""; // modpack name
-		public Map<String, String> installedModpacks; // modpack name, <modpack host address, minecraft server address>
-		public boolean selfUpdater = false;
-	}
-
-	public static class ClientConfigFieldsV2 {
-		public int DO_NOT_CHANGE_IT = 2; // file version
-		public String selectedModpack = ""; // modpack name
-		public Map<String, ModpackAddresses> installedModpacks; // modpack name, <modpack host address, minecraft server address>
+	public static class ClientConfigFieldsV3 {
+		public int DO_NOT_CHANGE_IT = 3; // file version
+		public String selectedModpackId = "";
+		@SerializedName(value = "modpackConnections", alternate = "installedModpacks")
+		public Map<String, ConnectionInfo> modpackConnections = new HashMap<>(); // modpack ID, known origin and endpoint routing
 		public boolean updateSelectedModpackOnLaunch = true;
 		public boolean selfUpdater = false;
 		public boolean syncAutoModpackVersion = true;
 		public boolean syncLoaderVersion = true;
 		public boolean playMusic = true;
 		public boolean allowRemoteNonModpackDeletions = true;
+
+		public ClientConfigFieldsV3() {}
+
+		public ClientConfigFieldsV3(ClientConfigFieldsV3 source) {
+			this.selectedModpackId = source.selectedModpackId;
+			this.modpackConnections = source.modpackConnections == null ? new HashMap<>() : new HashMap<>(source.modpackConnections);
+			this.updateSelectedModpackOnLaunch = source.updateSelectedModpackOnLaunch;
+			this.selfUpdater = source.selfUpdater;
+			this.syncAutoModpackVersion = source.syncAutoModpackVersion;
+			this.syncLoaderVersion = source.syncLoaderVersion;
+			this.playMusic = source.playMusic;
+			this.allowRemoteNonModpackDeletions = source.allowRemoteNonModpackDeletions;
+		}
 	}
 
-	public static class ModpackAddresses {
-		public InetSocketAddress hostAddress; // server-advertised modpack route; not an authenticated identity
-		public InetSocketAddress serverAddress; // immutable player-selected Minecraft origin; certificate trust root
-		public boolean requiresMagic; // if true, client will use magic packets to connect to the modpack host
+	public static class ConnectionInfo {
+		@SerializedName(value = "origin", alternate = "serverAddress")
+		public InetSocketAddress origin; // player-entered Minecraft identity and certificate trust root
+		@SerializedName(value = "endpoint", alternate = "hostAddress")
+		public InetSocketAddress endpoint; // server-advertised AutoModpack route; not an authenticated identity
+		public boolean requiresMagic;
+		public transient String expectedFingerprint; // runtime-only exact certificate pin bound to origin
+		public transient String trustReason; // non-null only while importing new trust
 
-		public ModpackAddresses() {
-			// Default constructor for Gson
-		}
+		public ConnectionInfo() {}
 
-		/**
-		 * ModpackEntry holds server connection details.
-		 *
-		 * @param hostAddress
-		 *            modpack server address that COULD be manipulated by the server
-		 * @param serverAddress
-		 *            minecraft server address that represents the target address
-		 *            which client uses to connect. This value CANNOT be manipulated by the server.
-		 */
-		public ModpackAddresses(InetSocketAddress hostAddress, InetSocketAddress serverAddress, boolean requiresMagic) {
-			this.hostAddress = hostAddress;
-			this.serverAddress = serverAddress;
+		public ConnectionInfo(InetSocketAddress origin, InetSocketAddress endpoint, boolean requiresMagic, String expectedFingerprint, String trustReason) {
+			this.origin = origin;
+			this.endpoint = endpoint;
 			this.requiresMagic = requiresMagic;
+			this.expectedFingerprint = expectedFingerprint;
+			this.trustReason = trustReason;
 		}
 
-		public boolean isAnyEmpty() {
-			return hostAddress == null || serverAddress == null || hostAddress.getHostString().isBlank() || serverAddress.getHostString().isBlank();
+		public boolean isComplete() {
+			return origin != null && endpoint != null && !origin.getHostString().isBlank() && !endpoint.getHostString().isBlank();
 		}
 	}
 
@@ -96,6 +100,7 @@ public class Jsons {
 		public boolean generateModpackOnStart = true;
 		public Set<String> syncedFiles = Set.of("/mods/*.jar", "/kubejs/**", "!/kubejs/server_scripts/**", "/emotes/*");
 		public Set<String> allowEditsInFiles = Set.of("/options.txt", "/config/**");
+		public Set<String> overwriteEditableFiles = Set.of();
 		public Set<String> forceCopyFilesToStandardLocation = Set.of();
 		public Map<String, String> nonModpackFilesToDelete = Map.of();
 		public boolean autoExcludeServerSideMods = true;
@@ -107,8 +112,10 @@ public class Jsons {
 		public String nagClickableLink = "https://modrinth.com/project/automodpack";
 		public String bindAddress = "";
 		public int bindPort = -1;
-		public String addressToSend = "";
-		public int portToSend = -1;
+		@SerializedName(value = "advertisedEndpointHost", alternate = "addressToSend")
+		public String advertisedEndpointHost = "";
+		@SerializedName(value = "advertisedEndpointPort", alternate = "portToSend")
+		public int advertisedEndpointPort = -1;
 		public boolean disableInternalTLS = false;
 		public boolean requireMagicPackets = false;
 		public boolean updateIpsOnEveryStart = false;
@@ -141,10 +148,31 @@ public class Jsons {
 	}
 
 	public static class KnownHostsFields {
-		public Map<String, String> hosts; // host, fingerprint
+		public Map<String, CertificateTrustEntry> hosts; // canonical Minecraft origin, exact certificate trust
+	}
+
+	public static class CertificateTrustEntry {
+		public String fingerprint;
+		public String reason;
+
+		public CertificateTrustEntry() {}
+
+		public CertificateTrustEntry(String fingerprint, String reason) {
+			this.fingerprint = fingerprint;
+			this.reason = reason;
+		}
+	}
+
+	public static class KnownHostsBootstrapFields {
+		public String origin;
+		public String fingerprint;
+		public String modpackId;
+		public String endpoint;
+		public Boolean requiresMagic;
 	}
 
 	public static class ModpackContentFields {
+		public String modpackId = "";
 		public String modpackName = "";
 		public String automodpackVersion = "";
 		public String loader = "";
@@ -166,15 +194,17 @@ public class Jsons {
 			public final String size;
 			public final String type;
 			public final boolean editable;
+			public final boolean overwriteEditable;
 			public final boolean forceCopy;
 			public final String sha1;
 			public final String murmur;
 
-			public ModpackContentItem(String file, String size, String type, boolean editable, boolean forceCopy, String sha1, String murmur) {
+			public ModpackContentItem(String file, String size, String type, boolean editable, boolean overwriteEditable, boolean forceCopy, String sha1, String murmur) {
 				this.file = file;
 				this.size = size;
 				this.type = type;
 				this.editable = editable;
+				this.overwriteEditable = overwriteEditable;
 				this.forceCopy = forceCopy;
 				this.sha1 = sha1;
 				this.murmur = murmur;

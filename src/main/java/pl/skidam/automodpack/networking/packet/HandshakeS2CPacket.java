@@ -40,7 +40,7 @@ public class HandshakeS2CPacket {
 		GameProfile profile = ((ServerLoginNetworkHandlerAccessor) handler).getGameProfile();
 		String playerName = GameHelpers.getPlayerName(profile);
 
-		if (playerName == null) { throw new IllegalStateException("Player name is null"); }
+		if (playerName == null) throw new IllegalStateException("Player name is null");
 
 		if (GameHelpers.getPlayerUUID(profile) == null) {
 //            if (server.isOnlineMode()) { This may happen with mods like 'easyauth', its possible to have an offline mode player join an online server
@@ -56,7 +56,7 @@ public class HandshakeS2CPacket {
 //            LOGGER.warn("Connection is not encrypted for player: {}", playerName);
 //        }
 
-		if (!GameHelpers.isPlayerAuthorized(connection.getRemoteAddress(), profile)) { return; }
+		if (!GameHelpers.isPlayerAuthorized(connection.getRemoteAddress(), profile)) return;
 
 		if (!understood) {
 			Common.players.put(playerName, false);
@@ -100,7 +100,7 @@ public class HandshakeS2CPacket {
 				return;
 			}
 
-			if (!hostServer.isRunning() && serverConfig.portToSend == -1) {
+			if (!hostServer.isRunning() && serverConfig.advertisedEndpointPort == -1) {
 				LOGGER.info("Host server is not running. Modpack will not be sent to {}", GameHelpers.getPlayerName(profile));
 				return;
 			}
@@ -117,14 +117,13 @@ public class HandshakeS2CPacket {
 			Secrets.Secret secret = Secrets.generateSecret();
 			SecretsStore.saveHostSecret(GameHelpers.getPlayerUUID(profile).toString(), secret);
 
-			String addressToSend = serverConfig.addressToSend;
-			int portToSend = serverConfig.portToSend;
+			String advertisedEndpointHost = serverConfig.advertisedEndpointHost;
+			int advertisedEndpointPort = serverConfig.advertisedEndpointPort;
 			boolean requiresMagic = (serverConfig.bindPort == -1 && hostServer.isRunning()) || serverConfig.requireMagicPackets;
 
-			LOGGER.info("Sending {} modpack host address: {}:{}", GameHelpers.getPlayerName(profile), addressToSend, portToSend);
+			LOGGER.info("Sending {} AutoModpack endpoint: {}:{}", GameHelpers.getPlayerName(profile), advertisedEndpointHost, advertisedEndpointPort);
 
-			DataPacket dataPacket = new DataPacket(addressToSend, portToSend, serverConfig.modpackName, secret, serverConfig.requireAutoModpackOnClient,
-					requiresMagic);
+			DataPacket dataPacket = new DataPacket(advertisedEndpointHost, advertisedEndpointPort, secret, serverConfig.requireAutoModpackOnClient, requiresMagic);
 			String packetContentJson = dataPacket.toJson();
 
 			FriendlyByteBuf outBuf = new FriendlyByteBuf(Unpooled.buffer());
@@ -137,14 +136,14 @@ public class HandshakeS2CPacket {
 
 	private static boolean isClientVersionHigher(String clientVersion) {
 		String versionPattern = "\\d+\\.\\d+\\.\\d+";
-		if (!clientVersion.matches(versionPattern)) { return false; }
+		if (!clientVersion.matches(versionPattern)) return false;
 
 		if (!clientVersion.equals(AM_VERSION)) {
 			String[] clientVersionComponents = clientVersion.split("\\.");
 			String[] serverVersionComponents = AM_VERSION.split("\\.");
 
 			for (int i = 0, n = clientVersionComponents.length; i < n; i++) {
-				if (clientVersionComponents[i].compareTo(serverVersionComponents[i]) > 0) { return true; }
+				if (clientVersionComponents[i].compareTo(serverVersionComponents[i]) > 0) return true;
 			}
 		}
 

@@ -1,12 +1,16 @@
+import com.diffplug.gradle.spotless.SpotlessExtension
+import com.fasterxml.jackson.databind.ObjectMapper
+import java.util.Locale
+
 plugins {
 	id("dev.kikugie.stonecutter")
-	kotlin("jvm") version "2.3.21" apply false
-	id("net.fabricmc.fabric-loom-remap") version "1.17-SNAPSHOT" apply false
-	id("net.fabricmc.fabric-loom") version "1.17-SNAPSHOT" apply false
-	id("net.neoforged.moddev") version "2.0.141" apply false
-	id("com.gradleup.shadow") version "9.4.3" apply false
-	id("org.moddedmc.wiki.toolkit") version "0.4+"
-	id("com.diffplug.spotless") version "8.8.0"
+	kotlin("jvm") apply false
+	id("net.fabricmc.fabric-loom-remap") apply false
+	id("net.fabricmc.fabric-loom") apply false
+	id("net.neoforged.moddev") apply false
+	id("com.gradleup.shadow") apply false
+	id("org.moddedmc.wiki.toolkit")
+	id("com.diffplug.spotless") apply false
 }
 
 repositories {
@@ -21,6 +25,28 @@ wiki {
 
 stonecutter active "26.2-fabric" // [SC] DO NOT EDIT
 
+fun structuredString(vararg path: String): String =
+	stonecutter.properties
+		.raw(*path)
+		.asPrimitive()
+		.content as String
+
+extra["loaderVersions"] =
+	mapOf(
+		"loader-fabric-15" to structuredString("loader-modules", "fabric-15"),
+		"loader-fabric-core" to structuredString("loader-modules", "fabric-15"),
+		"loader-fabric-16" to structuredString("loader-modules", "fabric-16"),
+		"loader-fabric-latest" to structuredString("fabric", "deps", "fabric-loader"),
+		"loader-forge-fml40" to structuredString("1.18.2-forge", "deps", "forge"),
+		"loader-forge-fml47" to structuredString("1.20.1-forge", "deps", "forge"),
+		"loader-forge-earlyservices" to structuredString("1.20.1-forge", "deps", "forge"),
+		"loader-modlauncher-earlyservices" to structuredString("1.20.1-forge", "deps", "forge"),
+		"loader-neoforge-fml4" to structuredString("1.21.1-neoforge", "deps", "neoforge"),
+		"loader-neoforge-fml10" to structuredString("1.21.10-neoforge", "deps", "neoforge"),
+		"loader-neoforge-earlyservices" to structuredString("1.21.10-neoforge", "deps", "neoforge"),
+		"loader-neoforge-fml11" to structuredString("26.1-neoforge", "deps", "neoforge"),
+	)
+
 stonecutter.parameters {
 	val (version, loader) = current.project.split('-', limit = 2)
 
@@ -34,7 +60,7 @@ stonecutter.parameters {
 		}
 
 		regex(current.parsed >= "1.21.11") {
-			replace("\\bResourceLocation\\b" to "Identifier", "\\bIdentifier\\b" to "ResourceLocation")
+			replace("\\bResourceLocation\\b", "Identifier", "\\bIdentifier\\b", "ResourceLocation")
 		}
 
 		string(current.parsed >= "1.21.11") {
@@ -72,37 +98,107 @@ val trackedMiscFiles =
 			},
 	)
 
-spotless {
-	java {
-		target("src/main/java/**/*.java", "core/src/**/*.java", "loader/**/src/**/*.java")
-		targetExclude("versions/**", stonecutterJava)
-		eclipse().configFile("config/format/eclipse-java.xml")
-		importOrder("java", "javax", "org", "com", "", "pl.skidam")
-		trimTrailingWhitespace()
-		endWithNewline()
+// Spotless applies Gradle's base plugin, which makes Stonecutter misclassify this controller
+// project as buildable. Apply it after Stonecutter's end-of-evaluation validation instead.
+afterEvaluate {
+	pluginManager.apply("com.diffplug.spotless")
+	extensions.configure<SpotlessExtension> {
+		java {
+			target("src/main/java/**/*.java", "core/src/**/*.java", "loader/**/src/**/*.java")
+			targetExclude("versions/**", stonecutterJava)
+			eclipse().configFile("config/format/eclipse-java.xml")
+			importOrder("java", "javax", "org", "com", "", "pl.skidam")
+			trimTrailingWhitespace()
+			endWithNewline()
+		}
+
+		format("stonecutterJava") {
+			target(stonecutterJava)
+			leadingSpacesToTabs(4)
+			trimTrailingWhitespace()
+			endWithNewline()
+		}
+
+		kotlinGradle {
+			target("**/*.gradle.kts")
+			targetExclude("versions/**", ".gradle/**", "**/build/**")
+			ktlint()
+			trimTrailingWhitespace()
+			endWithNewline()
+		}
+
+		format("misc") {
+			target(trackedMiscFiles)
+			targetExclude("versions/**", "autotester/uv.lock")
+			trimTrailingWhitespace()
+			endWithNewline()
+		}
+	}
+}
+
+val availableTargets = stonecutter.versions.map { it.project }.sorted()
+val selectedTargets =
+	run {
+		val targets =
+			providers
+				.gradleProperty("automodpack.targets")
+				.orNull
+				?.split(',')
+				?.map(String::trim)
+				?.filter(String::isNotEmpty)
+				.orEmpty()
+				.ifEmpty { availableTargets }
+		val duplicates =
+			targets
+				.groupingBy { it }
+				.eachCount()
+				.filterValues { it > 1 }
+				.keys
+		require(duplicates.isEmpty()) { "Duplicate AutoModpack targets: ${duplicates.sorted().joinToString()}" }
+		val unknown = targets.toSet() - availableTargets.toSet()
+		require(unknown.isEmpty()) { "Unknown AutoModpack targets: ${unknown.sorted().joinToString()}" }
+		targets
 	}
 
-	format("stonecutterJava") {
-		target(stonecutterJava)
-		leadingSpacesToTabs(4)
-		trimTrailingWhitespace()
-		endWithNewline()
+val releaseMatrixFile = layout.buildDirectory.file("ci/release-matrix.json")
+
+val writeReleaseMatrix =
+	tasks.register("writeReleaseMatrix") {
+		group = "publishing"
+		description = "Writes release metadata for the selected AutoModpack targets."
+		inputs.property("targets", selectedTargets)
+		outputs.file(releaseMatrixFile)
+
+		doLast {
+			val displayName = project.property("mod_name").toString()
+			val modName = displayName.lowercase(Locale.ROOT)
+			val modVersion = project.property("mod_version").toString()
+			val entries =
+				selectedTargets.map { target ->
+					val targetLine = target.substringBeforeLast('-')
+					val loader = target.substringAfterLast('-')
+					mapOf(
+						"subproject" to target,
+						"target" to targetLine,
+						"loader" to loader,
+						"file" to "$modName-mc$target-$modVersion.jar",
+						"mod_name" to displayName,
+						"mod_version" to modVersion,
+						"publish_versions" to structuredString(targetLine, "publish_versions"),
+					)
+				}
+			val output = releaseMatrixFile.get().asFile
+			output.parentFile.mkdirs()
+			output.writeText(ObjectMapper().writeValueAsString(mapOf("include" to entries)) + "\n")
+			println(output.absolutePath)
+		}
 	}
 
-	kotlinGradle {
-		target("**/*.gradle.kts")
-		targetExclude("versions/**", ".gradle/**", "**/build/**")
-		ktlint()
-		trimTrailingWhitespace()
-		endWithNewline()
-	}
-
-	format("misc") {
-		target(trackedMiscFiles)
-		targetExclude("versions/**", "autotester/uv.lock")
-		trimTrailingWhitespace()
-		endWithNewline()
-	}
+tasks.register("buildTargets") {
+	group = "build"
+	description = "Builds the selected AutoModpack targets and writes their release metadata."
+	dependsOn(selectedTargets.map { ":$it:build" })
+	dependsOn(writeReleaseMatrix)
 }
 
 tasks.register("formatApply") {

@@ -3,58 +3,88 @@ name: step.build
 on:
   workflow_call:
     inputs:
-      release:
-        type: boolean
-        required: false
-        default: false
-      target_subproject:
-        description: see release.yml, leave it empty to build all
+      source_sha:
+        description: Immutable commit to build
+        type: string
+        required: true
+      targets:
+        description: Comma-separated targets to build and expose; empty builds every target
         type: string
         required: false
         default: ''
-      autotest:
-        description: bundle the autotester instrumentation into the jars (never for releases)
-        type: boolean
+      artifact_retention_days:
+        description: Retention for individual jar artifacts
+        type: number
         required: false
-        default: false
+        default: 7
+    outputs:
+      matrix:
+        description: Metadata for the exposed jars
+        value: ${{ jobs.build.outputs.matrix }}
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build targets
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha }}
       - name: Set up JDK 25
         uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: 25
-
-      - name: Setup Gradle
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
+          add-job-summary: never
           cache-provider: basic
-          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
-      - name: Execute Gradle build
-        run: |
-          chmod +x gradlew
-          flags=""
-          if [ "${{ inputs.autotest }}" = "true" ]; then
-              flags="-Pautomodpack.autotest"
-          fi
-          if [ -z "${{ inputs.target_subproject }}" ]; then
-              echo "Building all subprojects"
-              ./gradlew build $flags
-          else
-              args=$(echo "${{ inputs.target_subproject }}" | tr ',' '\n' | sed 's/$/:build/' | paste -sd ' ')
-              echo "Building with arguments=$args"
-              ./gradlew $args $flags
-          fi
+      - name: Build targets
         env:
-          BUILD_ID: ${{ github.run_number }}
-          BUILD_RELEASE: ${{ inputs.release }}
-
-      - name: Upload artifacts
+          TARGETS: ${{ inputs.targets }}
+        run: ./gradlew buildTargets --continue "-Pautomodpack.targets=$TARGETS"
+      - name: Verify artifacts
+        id: matrix
+        run: |
+          set -euo pipefail
+          matrix=$(<build/ci/release-matrix.json)
+          mapfile -t expected_files < <(jq -r '.include[].file' <<<"$matrix")
+          for file in "${expected_files[@]}"; do
+            test -f "merged/$file" || { echo "Missing built jar: $file" >&2; exit 1; }
+          done
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+      - name: Upload temporary build bundle
         uses: actions/upload-artifact@v7
         with:
-          name: build-artifacts
+          name: build-staging
+          path: merged/*.jar
+          if-no-files-found: error
+          retention-days: 1
+
+  upload:
+    name: Upload ${{ matrix.subproject }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: build-staging
           path: merged
+      - name: Upload jar
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.file }}
+          path: merged/${{ matrix.file }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact_retention_days }}

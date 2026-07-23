@@ -1,5 +1,7 @@
 package pl.skidam.automodpack_core.auth;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Objects;
@@ -9,6 +11,7 @@ import java.util.concurrent.ConcurrentMap;
 import pl.skidam.automodpack_core.Constants;
 import pl.skidam.automodpack_core.config.ConfigTools;
 import pl.skidam.automodpack_core.config.Jsons;
+import pl.skidam.automodpack_core.utils.AddressHelpers;
 
 public class SecretsStore {
 	private static class SecretsCache {
@@ -23,12 +26,16 @@ public class SecretsStore {
 
 		public synchronized void load() {
 			if (db != null) return;
-			db = ConfigTools.load(configFile, Jsons.SecretsFields.class);
-			if (db != null && db.secrets != null && !db.secrets.isEmpty()) { cache.putAll(db.secrets); }
+			db = ConfigTools.readOrCreate(configFile, Jsons.SecretsFields.class, Jsons.SecretsFields::new);
+			if (db != null && db.secrets != null && !db.secrets.isEmpty()) cache.putAll(db.secrets);
 		}
 
 		public synchronized void save() {
-			ConfigTools.save(configFile, db);
+			try {
+				ConfigTools.writeAtomic(configFile, db);
+			} catch (IOException e) {
+				throw new ConfigTools.ConfigException("Failed to save secrets", e);
+			}
 		}
 
 		public Secrets.Secret get(String key) {
@@ -36,15 +43,17 @@ public class SecretsStore {
 			return cache.get(key);
 		}
 
-		public void save(String key, Secrets.Secret secret) throws IllegalArgumentException {
+		public synchronized void save(String key, Secrets.Secret secret) throws IllegalArgumentException {
 			if (key == null || key.isBlank() || secret == null || secret.secret().isBlank())
 				throw new IllegalArgumentException("Key or secret cannot be null or blank");
 			load();
 			cache.put(key, secret);
-			if (db == null) { db = new Jsons.SecretsFields(); }
+			if (db == null) db = new Jsons.SecretsFields();
+			if (db.secrets == null) db.secrets = new ConcurrentHashMap<>();
 			db.secrets.put(key, secret);
 			save();
 		}
+
 	}
 
 	private static final SecretsCache hostSecrets = new SecretsCache(Constants.serverSecretsFile);
@@ -54,7 +63,7 @@ public class SecretsStore {
 		hostSecrets.load();
 		for (var entry : hostSecrets.cache.entrySet()) {
 			var thisSecret = entry.getValue().secret();
-			if (Objects.equals(thisSecret, secret)) { return entry; }
+			if (Objects.equals(thisSecret, secret)) return entry;
 		}
 
 		return null;
@@ -64,11 +73,16 @@ public class SecretsStore {
 		hostSecrets.save(uuid, secret);
 	}
 
-	public static Secrets.Secret getClientSecret(String modpack) {
-		return clientSecrets.get(modpack);
+	public static Secrets.Secret getClientSecret(InetSocketAddress origin) {
+		return clientSecrets.get(clientKey(origin));
 	}
 
-	public static void saveClientSecret(String modpack, Secrets.Secret secret) throws IllegalArgumentException {
-		clientSecrets.save(modpack, secret);
+	public static void saveClientSecret(InetSocketAddress origin, Secrets.Secret secret) throws IllegalArgumentException {
+		clientSecrets.save(clientKey(origin), secret);
+	}
+
+	private static String clientKey(InetSocketAddress origin) {
+		if (origin == null) throw new IllegalArgumentException("Origin cannot be null");
+		return AddressHelpers.formatAddress(origin);
 	}
 }

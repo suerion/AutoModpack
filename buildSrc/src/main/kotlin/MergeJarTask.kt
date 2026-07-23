@@ -6,9 +6,12 @@ import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.TaskAction
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.jar.JarFile
+import java.util.jar.Manifest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -22,6 +25,12 @@ abstract class MergeJarTask : DefaultTask() {
 
     @get:Input
     abstract val libsPath: Property<String>
+
+    @get:Input
+    abstract val loaderModuleName: Property<String>
+
+    @get:Input
+    abstract val zstdVersion: Property<String>
 
     @get:Internal
     abstract val buildDirectory: DirectoryProperty
@@ -45,19 +54,18 @@ abstract class MergeJarTask : DefaultTask() {
         val time = System.currentTimeMillis()
         println("Found $jarToMerge to merge. Merging...")
 
-        val loaderModule = getLoaderModuleName(jarToMerge.name)
-
+        val loaderModule = loaderModuleName.get()
         val loaderBuildDir = File(rootProjectPath.get(), "loader/${loaderModule.replace("-", "/")}/build/libs")
         val loaderFile = loaderBuildDir.listFiles()
             ?.single { it.isFile && !it.name.endsWith("-sources.jar") && it.name.endsWith(".jar") }
             ?: error("No loader jar found in ${loaderBuildDir.absolutePath}")
 
         val libsDir = File(libsPath.get())
-        val zstdFile = libsDir.listFiles()
-            ?.firstOrNull { file -> file.isFile && file.name.startsWith("zstd-jni-") && file.name.endsWith(".jar") }
-            ?: error("No zstd-jni-*.jar found in libs directory! ${libsDir.absolutePath}")
+        val zstdFile = File(libsDir, "zstd-jni-${zstdVersion.get()}.jar")
+        check(zstdFile.isFile) { "No ${zstdFile.name} found in libs directory! ${libsDir.absolutePath}" }
 
         val finalJar = File(mergedDir, jarToMerge.name)
+        val manifest = mergeStonecutterMetadata(loaderFile, jarToMerge)
 
         val seen = mutableSetOf<String>()
         ZipOutputStream(FileOutputStream(finalJar).buffered()).use { zipStream ->
@@ -66,7 +74,11 @@ abstract class MergeJarTask : DefaultTask() {
                     .forEach { entry ->
                         if (seen.add(entry.name) && !entry.isDirectory) {
                             zipStream.putNextEntry(ZipEntry(entry.name))
-                            baseStream.copyTo(zipStream)
+                            if (entry.name == JarFile.MANIFEST_NAME) {
+                                zipStream.write(manifest)
+                            } else {
+                                baseStream.copyTo(zipStream)
+                            }
                             zipStream.closeEntry()
                         }
                     }
@@ -85,5 +97,21 @@ abstract class MergeJarTask : DefaultTask() {
 
         outputJar.get().asFile.writeText(finalJar.absolutePath)
         println("Merged: ${jarToMerge.name} and ${zstdFile.name} from: ${loaderFile.name} into: ${finalJar.name} Took: ${System.currentTimeMillis() - time}ms")
+    }
+
+    private fun mergeStonecutterMetadata(loaderFile: File, modFile: File): ByteArray {
+        val manifest = JarFile(loaderFile).use { it.manifest ?: Manifest() }
+        val modAttributes = JarFile(modFile).use { it.manifest?.mainAttributes }
+
+        modAttributes?.forEach { key, value ->
+            if (key.toString().startsWith("Stonecutter-")) {
+                manifest.mainAttributes[key] = value
+            }
+        }
+
+        return ByteArrayOutputStream().use { output ->
+            manifest.write(output)
+            output.toByteArray()
+        }
     }
 }

@@ -11,7 +11,7 @@ import pytest
 
 from automodpack_autotester.config import load_macros, load_scenarios, parse_server_files
 from automodpack_autotester.engine import run_flow
-from automodpack_autotester.engine.registry import verb
+from automodpack_autotester.engine.registry import temporary, verb
 
 from .conftest import FakeBridge
 
@@ -84,18 +84,8 @@ _STUBS = {
 
 @pytest.fixture(autouse=True)
 def _use_stub_verbs():
-    from automodpack_autotester.engine.registry import VERBS
-
-    saved = {name: VERBS.get(name) for name in _STUBS}
-    VERBS.update(_STUBS)
-    try:
+    with temporary(_STUBS):
         yield
-    finally:
-        for name, fn in saved.items():
-            if fn is None:
-                VERBS.pop(name, None)
-            else:
-                VERBS[name] = fn
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -130,7 +120,7 @@ def test_download_only_flow(make_ctx):
 
     assert all(r["ok"] for r in results), [r for r in results if not r["ok"]]
     assert ctx.bridge.fingerprint == "AB:CD:EF:01:23"
-    root = ctx.game_dir / "automodpack" / "modpacks" / ctx.modpack_name
+    root = ctx.game_dir / ctx.selected_modpack_dir()
     for rel, _ in ctx.scenario_files:
         assert (root / rel).exists(), f"missing synced file {rel}"
 

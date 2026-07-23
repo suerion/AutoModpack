@@ -1,5 +1,6 @@
 package pl.skidam.automodpack_loader_core_neoforge;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -40,7 +41,7 @@ public class EarlyServiceBootstrapper implements GraphicsBootstrapper {
 			EARLY_MC_VERSION = argValue(arguments, "--fml.mcVersion");
 			EARLY_NEOFORGE_VERSION = argValue(arguments, "--fml.neoForgeVersion");
 			String launchTarget = argValue(arguments, "--launchTarget");
-			if (launchTarget != null) { EARLY_IS_CLIENT = !launchTarget.toLowerCase(Locale.ROOT).contains("server"); }
+			if (launchTarget != null) EARLY_IS_CLIENT = !launchTarget.toLowerCase(Locale.ROOT).contains("server");
 
 			// Run the update/reconcile step before anything below reads the modpack folder, so an
 			// update that changes which mods are early-service mods is reflected in the same boot.
@@ -51,11 +52,11 @@ public class EarlyServiceBootstrapper implements GraphicsBootstrapper {
 
 			// Set by Preload only when a modpack is selected on a client - null means nothing to do.
 			Path modpackMods = Constants.selectedModpackDir == null ? null : Constants.selectedModpackDir.resolve("mods");
-			if (modpackMods == null || !Files.isDirectory(modpackMods)) { return; }
+			if (modpackMods == null || !Files.isDirectory(modpackMods)) return;
 
 			List<Path> earlyServiceJars = EarlyServiceScan.eligibleJars(modpackMods, EarlyServiceLayer::eligibleForInPlace);
 
-			if (earlyServiceJars.isEmpty()) { return; }
+			if (earlyServiceJars.isEmpty()) return;
 
 			Constants.LOGGER.info("[AutoModpack] Bootstrapping {} early-service mod(s) from the modpack folder in place", earlyServiceJars.size());
 
@@ -72,10 +73,10 @@ public class EarlyServiceBootstrapper implements GraphicsBootstrapper {
 					}
 				}
 				earlyServiceJars = appended;
-				if (earlyServiceJars.isEmpty()) { return; }
+				if (earlyServiceJars.isEmpty()) return;
 			}
 
-			EarlyServiceLayer.register(earlyServiceJars, childLoader);
+			EarlyServiceLayer.register(earlyServiceJars);
 
 			for (Path jar : earlyServiceJars) {
 				for (String impl : EarlyServiceLayer.serviceImpls(jar, EarlyServiceLayer.GRAPHICS_BOOTSTRAPPER_SERVICE)) {
@@ -96,10 +97,10 @@ public class EarlyServiceBootstrapper implements GraphicsBootstrapper {
 	}
 
 	/**
-	 * Grows FMLLoader's own flat classloader chain with these jars, mirroring what it does for its
-	 * own "FML Early Services" jars ({@code FMLLoader.loadEarlyServices()} ->
-	 * {@code appendLoader("FML Early Services", jarContentsList)}), a private instance method reached
-	 * via reflection.
+	 * Registers these jars exactly like {@code FMLLoader.loadEarlyServices()}: each path becomes a
+	 * native early-service mod file, its contents grow FMLLoader's flat classloader chain, and the mod
+	 * file joins {@code earlyServicesJars} so dependency locators can inspect its nested jars later.
+	 * FML keeps all three operations private, so this mirrors them through reflection.
 	 *
 	 * <p>
 	 * This also bridges to the game layer: {@code FMLLoader} later builds the GAME
@@ -112,16 +113,29 @@ public class EarlyServiceBootstrapper implements GraphicsBootstrapper {
 			Class<?> fmlLoaderClass = Class.forName("net.neoforged.fml.loading.FMLLoader");
 			Object current = fmlLoaderClass.getMethod("getCurrent").invoke(null);
 
-			Class<?> jarContentsClass = Class.forName("net.neoforged.fml.jarcontents.JarContents");
-			Method ofPath = jarContentsClass.getMethod("ofPath", Path.class);
+			Class<?> earlyServiceDiscovery = Class.forName("net.neoforged.fml.loading.EarlyServiceDiscovery");
+			Method createEarlyServiceModFile = earlyServiceDiscovery.getDeclaredMethod("createEarlyServiceModFile", Path.class);
+			createEarlyServiceModFile.setAccessible(true);
+
+			Class<?> modFileClass = Class.forName("net.neoforged.fml.loading.moddiscovery.ModFile");
+			Method getContents = modFileClass.getMethod("getContents");
+			List<Object> earlyServiceModFiles = new ArrayList<>(jars.size());
 			List<Object> jarContentsList = new ArrayList<>(jars.size());
 			for (Path jar : jars) {
-				jarContentsList.add(ofPath.invoke(null, jar));
+				Object modFile = createEarlyServiceModFile.invoke(null, jar);
+				earlyServiceModFiles.add(modFile);
+				jarContentsList.add(getContents.invoke(modFile));
 			}
 
 			Method appendLoader = fmlLoaderClass.getDeclaredMethod("appendLoader", String.class, List.class);
 			appendLoader.setAccessible(true);
 			appendLoader.invoke(current, "automodpack modpack early services", jarContentsList);
+
+			Field earlyServicesJars = fmlLoaderClass.getDeclaredField("earlyServicesJars");
+			earlyServicesJars.setAccessible(true);
+			@SuppressWarnings("unchecked")
+			List<Object> registered = (List<Object>) earlyServicesJars.get(current);
+			registered.addAll(earlyServiceModFiles);
 
 			Method getCurrentClassLoader = fmlLoaderClass.getMethod("getCurrentClassLoader");
 			return (ClassLoader) getCurrentClassLoader.invoke(current);
@@ -136,8 +150,8 @@ public class EarlyServiceBootstrapper implements GraphicsBootstrapper {
 		if (arguments != null) {
 			String prefix = name + "=";
 			for (int i = 0; i < arguments.length; i++) {
-				if (name.equals(arguments[i]) && i + 1 < arguments.length) { return arguments[i + 1]; }
-				if (arguments[i].startsWith(prefix)) { return arguments[i].substring(prefix.length()); }
+				if (name.equals(arguments[i]) && i + 1 < arguments.length) return arguments[i + 1];
+				if (arguments[i].startsWith(prefix)) return arguments[i].substring(prefix.length());
 			}
 		}
 		return null;

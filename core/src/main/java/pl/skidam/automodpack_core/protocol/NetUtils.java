@@ -61,7 +61,7 @@ public class NetUtils {
 	private static final Provider BC_PROVIDER = new BouncyCastleProvider();
 
 	static {
-		if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) { Security.addProvider(BC_PROVIDER); }
+		if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) Security.addProvider(BC_PROVIDER);
 	}
 
 	public static String getFingerprint(X509Certificate cert) throws CertificateEncodingException {
@@ -74,6 +74,17 @@ public class NetUtils {
 		} catch (NoSuchAlgorithmException e) {
 			throw new RuntimeException(e);
 		}
+	}
+
+	public static String normalizeFingerprint(String fingerprint) {
+		String normalized = fingerprint == null ? "" : fingerprint.replace(":", "").trim().toLowerCase(Locale.ROOT);
+		if (!normalized.matches("[0-9a-f]{64}")) throw new IllegalArgumentException("Certificate fingerprint must be 64 hexadecimal characters");
+		return normalized;
+	}
+
+	public static String shortenFingerprint(String fingerprint) {
+		if (fingerprint == null || fingerprint.length() <= 19) return fingerprint;
+		return fingerprint.substring(0, 8) + "…" + fingerprint.substring(fingerprint.length() - 8);
 	}
 
 	public static KeyPair generateKeyPair() throws Exception {

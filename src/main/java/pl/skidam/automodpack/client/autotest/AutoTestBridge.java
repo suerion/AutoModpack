@@ -65,8 +65,7 @@ public final class AutoTestBridge {
 		return reloadFinished;
 	}
 
-	public static void startIfEnabled() {
-		if (!Boolean.getBoolean("automodpack.autotest")) return;
+	public static void start() {
 		if (!STARTED.compareAndSet(false, true)) return;
 		String token = System.getProperty("automodpack.autotest.token", "");
 		String gameDir = System.getProperty("automodpack.autotest.gamedir", "");
@@ -232,11 +231,10 @@ public final class AutoTestBridge {
 	private static String connect(JsonObject req) {
 		Minecraft c = Minecraft.getInstance();
 		String host = optString(req, "host");
-		int port = optInt(req, "port", 25565);
 		if (host.isBlank()) return err("host is required");
 
-		ServerAddress address = ServerAddress.parseString(host + ":" + port);
-		ServerData serverData = new ServerData("AutoTest", address.toString()
+		ServerAddress address = ServerAddress.parseString(host);
+		ServerData serverData = new ServerData("AutoTest", host
 				/*? if >= 1.20.4 {*/, ServerData.Type.OTHER/*?} else {*//*, false*//*?}*/);
 		/*? if >= 1.20.5 {*/
 		ConnectScreen.startConnecting(new TitleScreen(), c, address, serverData, false, (TransferState) null);

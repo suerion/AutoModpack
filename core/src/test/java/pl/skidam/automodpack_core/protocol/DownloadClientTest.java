@@ -6,6 +6,8 @@ import java.io.IOException;
 import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.KeyStore;
 import java.security.SecureRandom;
@@ -18,6 +20,7 @@ import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManagerFactory;
@@ -30,10 +33,18 @@ import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import pl.skidam.automodpack_core.config.Jsons;
 
 class DownloadClientTest {
+
+	@Test
+	void localDestinationOpenFailureHasTypedStorageBoundary(@TempDir Path directory) throws Exception {
+		Path destination = Files.createDirectory(directory.resolve("destination"));
+
+		assertThrows(LocalStorageException.class, () -> LocalFileWriter.open(destination));
+	}
 
 	@Test
 	void acceptsValidSelfSignedCertificateForDnsFallback() throws Exception {
@@ -53,7 +64,7 @@ class DownloadClientTest {
 	}
 
 	@Test
-	void acceptsExpiredSelfSignedCertificateForDnsFallback() throws Exception {
+	void recognizesExpiredCertificateAsSelfSigned() throws Exception {
 		KeyPair keyPair = NetUtils.generateKeyPair();
 		X500Name subject = new X500Name("CN=Expired AutoModpack Certificate");
 		X509Certificate certificate = issueCertificate(subject, subject, null, keyPair, keyPair, Instant.now().minusSeconds(7200),
@@ -70,15 +81,29 @@ class DownloadClientTest {
 				Instant.now().plusSeconds(3600));
 
 		withTlsServer(keyPair, certificate, port -> {
-			var addresses = new Jsons.ModpackAddresses(InetSocketAddress.createUnresolved("route.example", port),
-					InetSocketAddress.createUnresolved("origin.example", 25565), false);
+			var connectionInfo = new Jsons.ConnectionInfo(InetSocketAddress.createUnresolved("origin.example", 25565),
+					InetSocketAddress.createUnresolved("route.example", port), false, null, null);
 			var route = new InetSocketAddress("127.0.0.1", port);
 
 			assertDoesNotThrow(() -> {
-				var connection = new PreValidationConnection(route, addresses, clientContext(certificate));
+				var connection = new PreValidationConnection(route, connectionInfo, clientContext(certificate));
 				connection.getSocket().close();
 			});
 		});
+	}
+
+	@Test
+	void exactPinConstrainsOtherwiseTrustedCertificate() throws Exception {
+		X509Certificate certificate = NetUtils.selfSign(NetUtils.generateKeyPair());
+		KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
+		trustStore.load(null);
+
+		var matching = new CustomizableTrustManager(trustStore, null, "origin.example", NetUtils.getFingerprint(certificate));
+		assertDoesNotThrow(() -> matching.checkServerTrusted(new X509Certificate[]{certificate}, "RSA"));
+
+		var mismatching = new CustomizableTrustManager(trustStore, null, "origin.example", "0".repeat(64));
+		assertThrows(CertificatePinMismatchException.class, () -> mismatching.checkServerTrusted(new X509Certificate[]{certificate}, "RSA"));
+		assertThrows(CertificatePinMismatchException.class, () -> mismatching.checkServerTrusted(new X509Certificate[]{certificate}, "RSA", (SSLEngine) null));
 	}
 
 	@Test
@@ -89,11 +114,11 @@ class DownloadClientTest {
 				Instant.now().plusSeconds(3600));
 
 		withTlsServer(keyPair, certificate, port -> {
-			var addresses = new Jsons.ModpackAddresses(InetSocketAddress.createUnresolved("route.example", port),
-					InetSocketAddress.createUnresolved("origin.example", 25565), false);
+			var connectionInfo = new Jsons.ConnectionInfo(InetSocketAddress.createUnresolved("origin.example", 25565),
+					InetSocketAddress.createUnresolved("route.example", port), false, null, null);
 			var route = new InetSocketAddress("127.0.0.1", port);
 
-			assertThrows(IOException.class, () -> new PreValidationConnection(route, addresses, clientContext(certificate)));
+			assertThrows(IOException.class, () -> new PreValidationConnection(route, connectionInfo, clientContext(certificate)));
 		});
 	}
 
@@ -147,7 +172,7 @@ class DownloadClientTest {
 	private static X509Certificate issueCertificate(X500Name issuer, X500Name subject, String dnsName, KeyPair subjectKeyPair, KeyPair signingKeyPair,
 			Instant notBefore, Instant notAfter) throws Exception {
 		var builder = new JcaX509v3CertificateBuilder(issuer, BigInteger.ONE, Date.from(notBefore), Date.from(notAfter), subject, subjectKeyPair.getPublic());
-		if (dnsName != null) { builder.addExtension(Extension.subjectAlternativeName, false, new GeneralNames(new GeneralName(GeneralName.dNSName, dnsName))); }
+		if (dnsName != null) builder.addExtension(Extension.subjectAlternativeName, false, new GeneralNames(new GeneralName(GeneralName.dNSName, dnsName)));
 		var signer = new JcaContentSignerBuilder("SHA256WithRSA").build(signingKeyPair.getPrivate());
 		return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
 	}

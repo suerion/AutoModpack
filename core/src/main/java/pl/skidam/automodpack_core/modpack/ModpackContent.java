@@ -2,6 +2,7 @@ package pl.skidam.automodpack_core.modpack;
 
 import static pl.skidam.automodpack_core.Constants.*;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -20,18 +21,23 @@ import pl.skidam.automodpack_core.utils.cache.FileMetadataCache;
 public class ModpackContent {
 	public final Set<Jsons.ModpackContentFields.ModpackContentItem> list = ConcurrentHashMap.newKeySet();
 	public final ObservableMap<String, Path> pathsMap = new ObservableMap<>();
+	private final String MODPACK_ID;
 	private final String MODPACK_NAME;
 	private final FileTreeScanner SYNCED_FILES_CARDS;
 	private final FileTreeScanner EDITABLE_CARDS;
+	private final FileTreeScanner OVERWRITE_EDITABLE_CARDS;
 	private final FileTreeScanner FORCE_COPY_FILES_TO_STANDARD_LOCATION;
 	private final Path MODPACK_DIR;
 	private final ThreadPoolExecutor CREATION_EXECUTOR;
 	private final Map<String, String> sha1MurmurMapPreviousContent = new HashMap<>();
+	private Optional<Jsons.ModpackContentFields> cachedPreviousContent;
 
 	public ModpackContent(String modpackName, Path cwd, Path modpackDir, Set<String> syncedFiles, Set<String> allowEditsInFiles,
-			Set<String> forceCopyFilesToStandardLocation, ThreadPoolExecutor CREATION_EXECUTOR) {
+			Set<String> overwriteEditableFiles, Set<String> forceCopyFilesToStandardLocation, ThreadPoolExecutor CREATION_EXECUTOR) {
 		this.MODPACK_NAME = modpackName;
 		this.MODPACK_DIR = modpackDir;
+		this.cachedPreviousContent = getPreviousContent();
+		this.MODPACK_ID = resolveModpackId(cachedPreviousContent);
 		this.CREATION_EXECUTOR = CREATION_EXECUTOR;
 		Set<Path> directoriesToSearch = new HashSet<>(2);
 		if (MODPACK_DIR != null) directoriesToSearch.add(MODPACK_DIR);
@@ -42,7 +48,24 @@ public class ModpackContent {
 			this.SYNCED_FILES_CARDS = new FileTreeScanner(syncedFiles, Set.of());
 		}
 		this.EDITABLE_CARDS = new FileTreeScanner(allowEditsInFiles, directoriesToSearch);
+		this.OVERWRITE_EDITABLE_CARDS = new FileTreeScanner(overwriteEditableFiles, directoriesToSearch);
 		this.FORCE_COPY_FILES_TO_STANDARD_LOCATION = new FileTreeScanner(forceCopyFilesToStandardLocation, directoriesToSearch);
+	}
+
+	private String resolveModpackId(Optional<Jsons.ModpackContentFields> previousContent) {
+		if (previousContent.isEmpty() || previousContent.get().modpackId == null || previousContent.get().modpackId.isBlank()) return ModpackId.generate();
+		return ModpackId.requireValid(previousContent.get().modpackId);
+	}
+
+	private Optional<Jsons.ModpackContentFields> consumePreviousContent() {
+		if (cachedPreviousContent == null) return getPreviousContent();
+		var previousContent = cachedPreviousContent;
+		cachedPreviousContent = null;
+		return previousContent;
+	}
+
+	public String getModpackId() {
+		return MODPACK_ID;
 	}
 
 	public String getModpackName() {
@@ -60,7 +83,7 @@ public class ModpackContent {
 			pathsMap.clear();
 			sha1MurmurMapPreviousContent.clear();
 
-			getPreviousContent().ifPresent(previousContent -> {
+			consumePreviousContent().ifPresent(previousContent -> {
 				Map<String, Jsons.ModpackContentFields.FileToDelete> oldFilesMap = previousContent.nonModpackFilesToDelete.stream()
 						.collect(Collectors.toMap(f -> f.file, f -> f, (a, b) -> a));
 
@@ -97,7 +120,7 @@ public class ModpackContent {
 					.map(entry -> CompletableFuture.supplyAsync(() -> {
 						try {
 							var contentEntry = generateContent(entry.getValue(), entry.getKey(), cache);
-							if (contentEntry == null) { return null; }
+							if (contentEntry == null) return null;
 							LOGGER.debug("Generated modpack content for {}", entry.getValue());
 							tempPathMap.put(contentEntry.sha1, entry.getValue());
 							return contentEntry;
@@ -129,18 +152,18 @@ public class ModpackContent {
 		}
 
 		saveModpackContent(computedFilesToDelete);
-		if (hostServer != null) { hostServer.setPaths(pathsMap); }
+		if (hostServer != null) hostServer.setPaths(pathsMap);
 
 		return true;
 	}
 
 	public Optional<Jsons.ModpackContentFields> getPreviousContent() {
 		var optionalModpackContentFile = ModpackContentTools.getModpackContentFile(MODPACK_DIR);
-		return optionalModpackContentFile.map(ConfigTools::loadModpackContent);
+		return optionalModpackContentFile.map(ModpackContentTools::read);
 	}
 
 	public boolean loadPreviousContent() {
-		var optionalPreviousModpackContent = getPreviousContent();
+		var optionalPreviousModpackContent = consumePreviousContent();
 		if (optionalPreviousModpackContent.isEmpty()) return false;
 		Jsons.ModpackContentFields previousModpackContent = optionalPreviousModpackContent.get();
 
@@ -159,7 +182,7 @@ public class ModpackContent {
 			}
 		}
 
-		if (hostServer != null) { hostServer.setPaths(pathsMap); }
+		if (hostServer != null) hostServer.setPaths(pathsMap);
 
 		saveModpackContent(previousModpackContent.nonModpackFilesToDelete);
 
@@ -167,7 +190,7 @@ public class ModpackContent {
 	}
 
 	public synchronized void saveModpackContent(Set<Jsons.ModpackContentFields.FileToDelete> nonModpackFilesToDelete) {
-		if (nonModpackFilesToDelete == null) { throw new IllegalArgumentException("filesToDelete is null"); }
+		if (nonModpackFilesToDelete == null) throw new IllegalArgumentException("filesToDelete is null");
 
 		synchronized (list) {
 			Jsons.ModpackContentFields modpackContent = new Jsons.ModpackContentFields(list);
@@ -176,10 +199,15 @@ public class ModpackContent {
 			modpackContent.mcVersion = MC_VERSION;
 			modpackContent.loaderVersion = LOADER_VERSION;
 			modpackContent.loader = LOADER;
+			modpackContent.modpackId = MODPACK_ID;
 			modpackContent.modpackName = MODPACK_NAME;
 			modpackContent.nonModpackFilesToDelete = nonModpackFilesToDelete;
 
-			ConfigTools.saveModpackContent(hostModpackContentFile, modpackContent);
+			try {
+				ModpackContentTools.write(hostModpackContentFile, modpackContent);
+			} catch (IOException e) {
+				throw new ConfigTools.ConfigException("Failed to save modpack content", e);
+			}
 		}
 	}
 
@@ -239,9 +267,9 @@ public class ModpackContent {
 			return null;
 		}
 
-		if (isInnerFile(file)) { return null; }
+		if (isInnerFile(file)) return null;
 
-		if (formattedFile.startsWith("/automodpack/")) { return null; }
+		if (formattedFile.startsWith("/automodpack/")) return null;
 
 		final String size = String.valueOf(Files.size(file));
 
@@ -303,7 +331,7 @@ public class ModpackContent {
 		String murmur = null;
 		if (type.equals("mod") || type.equals("shader") || type.equals("resourcepack")) {
 			murmur = sha1MurmurMapPreviousContent.get(sha1); // Get from cache
-			if (murmur == null) { murmur = HashUtils.getCurseforgeMurmurHash(file); }
+			if (murmur == null) murmur = HashUtils.getCurseforgeMurmurHash(file);
 		}
 
 		boolean isEditable = false;
@@ -312,12 +340,15 @@ public class ModpackContent {
 			LOGGER.info("File {} is editable!", formattedFile);
 		}
 
+		boolean overwriteEditable = isEditable && OVERWRITE_EDITABLE_CARDS.matches(formattedFile);
+		if (overwriteEditable) LOGGER.debug("Editable file {} is overwritten when the server changes it!", formattedFile);
+
 		boolean forcedToCopy = false;
 		if (FORCE_COPY_FILES_TO_STANDARD_LOCATION.hasMatch(formattedFile)) {
 			forcedToCopy = true;
 			LOGGER.info("File {} is forced to copy to standard location!", formattedFile);
 		}
 
-		return new Jsons.ModpackContentFields.ModpackContentItem(formattedFile, size, type, isEditable, forcedToCopy, sha1, murmur);
+		return new Jsons.ModpackContentFields.ModpackContentItem(formattedFile, size, type, isEditable, overwriteEditable, forcedToCopy, sha1, murmur);
 	}
 }

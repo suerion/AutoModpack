@@ -8,23 +8,35 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import pl.skidam.automodpack_core.Constants;
+import pl.skidam.automodpack_core.config.ConfigTools;
 import pl.skidam.automodpack_core.config.Jsons;
+import pl.skidam.automodpack_core.utils.ModpackContentTools;
 
 class ModpackTest {
 
 	@TempDir
 	Path testFilesDir;
+	Path originalContentFile;
 
 	@BeforeEach
 	void setUp() throws IOException {
 		DEBUG = true;
+		originalContentFile = Constants.hostModpackContentFile;
+		Constants.hostModpackContentFile = testFilesDir.getParent().resolve("automodpack-content.json");
 		createTestFiles();
+	}
+
+	@AfterEach
+	void tearDown() {
+		Constants.hostModpackContentFile = originalContentFile;
 	}
 
 	private void createTestFiles() throws IOException {
@@ -95,9 +107,24 @@ class ModpackTest {
 		Constants.serverConfig = new Jsons.ServerConfigFieldsV2();
 		Constants.serverConfig.autoExcludeUnnecessaryFiles = false;
 
-		ModpackContent content = new ModpackContent("TestPack", null, testFilesDir, new HashSet<>(), new HashSet<>(editable), new HashSet<>(),
+		ModpackContent content = new ModpackContent("TestPack", null, testFilesDir, new HashSet<>(), new HashSet<>(editable),
+				Set.of("/config/random-options.txt"), new HashSet<>(),
 				new ModpackExecutor().getExecutor());
 		content.create(null);
+		Jsons.ModpackContentFields firstManifest = ModpackContentTools.read(Constants.hostModpackContentFile);
+		assertNotNull(firstManifest);
+		assertTrue(ModpackId.isValid(firstManifest.modpackId));
+		assertTrue(firstManifest.list.stream().filter(item -> item.file.equals("/config/random-options.txt")).findFirst().orElseThrow().overwriteEditable);
+		assertFalse(firstManifest.list.stream().filter(item -> item.file.equals("/config/config.json")).findFirst().orElseThrow().overwriteEditable);
+
+		ModpackContent renamedContent = new ModpackContent("Renamed Pack", null, testFilesDir, new HashSet<>(), new HashSet<>(editable),
+				Set.of("/config/random-options.txt"), new HashSet<>(),
+				new ModpackExecutor().getExecutor());
+		renamedContent.create(null);
+		Jsons.ModpackContentFields renamedManifest = ModpackContentTools.read(Constants.hostModpackContentFile);
+		assertNotNull(renamedManifest);
+		assertEquals(firstManifest.modpackId, renamedManifest.modpackId);
+		assertEquals("Renamed Pack", renamedManifest.modpackName);
 
 		boolean correct = true;
 

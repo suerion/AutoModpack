@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+import tomllib
 
 import yaml
 
@@ -30,6 +31,12 @@ def load_settings() -> dict:
     return load_yaml(ROOT / "settings.yaml")
 
 
+@lru_cache(maxsize=1)
+def load_stonecutter_properties() -> dict:
+    with (REPO_ROOT / "stonecutter.properties.toml").open("rb") as f:
+        return tomllib.load(f)
+
+
 @dataclass
 class Target:
     id: str
@@ -39,22 +46,42 @@ class Target:
     fabric_loader: str | None = None
     forge_version: str | None = None
     neoforge_version: str | None = None
+    artifact_pattern: str = "automodpack-mc{id}-*.jar"
 
 
 def load_targets() -> dict[str, Target]:
     raw = load_yaml(ROOT / "targets.yaml")
-    d = raw.get("defaults", {})
+    defaults = raw.get("defaults", {})
+    stonecutter = load_stonecutter_properties()
     targets = []
     for item in raw.get("targets", []):
+        target_id = item["id"]
+        version, default_loader = target_id.rsplit("-", 1)
+        loader = item.get("loader", default_loader)
+        minecraft = item.get("minecraft", stonecutter[version]["deps"]["minecraft"])
+        loader_dependencies = stonecutter.get(target_id, {}).get("deps", {})
+        forge_coordinate = loader_dependencies.get("forge")
+        forge_version = forge_coordinate.removeprefix(f"{minecraft}-") if forge_coordinate else None
+
         targets.append(
             Target(
-                id=item["id"],
-                minecraft=item["minecraft"],
-                loader=item["loader"],
-                java=item.get("java", d.get("java", 21)),
-                fabric_loader=item.get("fabricLoader", d.get("fabricLoader")),
-                forge_version=item.get("forgeVersion", d.get("forgeVersion")),
-                neoforge_version=item.get("neoforgeVersion", d.get("neoforgeVersion")),
+                id=target_id,
+                minecraft=minecraft,
+                loader=loader,
+                java=item.get("java", defaults.get("java", 21)),
+                fabric_loader=item.get(
+                    "fabricLoader",
+                    defaults.get("fabricLoader", stonecutter["fabric"]["deps"]["fabric-loader"]),
+                ),
+                forge_version=item.get("forgeVersion", defaults.get("forgeVersion", forge_version)),
+                neoforge_version=item.get(
+                    "neoforgeVersion",
+                    defaults.get("neoforgeVersion", loader_dependencies.get("neoforge")),
+                ),
+                artifact_pattern=item.get(
+                    "artifactPattern",
+                    defaults.get("artifactPattern", "automodpack-mc{id}-*.jar"),
+                ),
             )
         )
     return {t.id: t for t in targets}

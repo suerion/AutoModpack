@@ -50,6 +50,9 @@ tasks.named("build") {
 		taksToRun.add(":$module:build")
 	}
 	dependsOn(taksToRun)
+	if (project.hasProperty("automodpack.autotest")) {
+		dependsOn(":autotest-fixtures:build")
+	}
 	finalizedBy(tasks.named("mergeJar"))
 }
 
@@ -71,6 +74,8 @@ val mergeJarTask =
 		this.mergedDirPath.set(project.rootProject.projectDir.absolutePath + "/merged")
 		this.rootProjectPath.set(project.rootProject.projectDir.absolutePath)
 		this.libsPath.set(project.rootProject.projectDir.absolutePath + "/libs")
+		this.loaderModuleName.set(getLoaderModuleName(project.name))
+		this.zstdVersion.set(versionProperty("versionZstdJni"))
 		this.buildDirectory.set(layout.buildDirectory)
 		this.outputJar.set(layout.buildDirectory.file("merged-jar-path.txt"))
 

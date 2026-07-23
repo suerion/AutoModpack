@@ -30,7 +30,7 @@ public class Constants {
 	public static ModpackExecutor modpackExecutor;
 	public static NettyServer hostServer;
 	public static Jsons.ServerConfigFieldsV2 serverConfig;
-	public static Jsons.ClientConfigFieldsV2 clientConfig;
+	public static Jsons.ClientConfigFieldsV3 clientConfig;
 	public static Jsons.KnownHostsFields knownHosts;
 	public static final Path automodpackDir = Path.of("automodpack");
 	public static final Path storeDir = automodpackDir.resolve("store");
@@ -52,6 +52,10 @@ public class Constants {
 	public static final Path privateDir = automodpackDir.resolve(".private");
 	public static final Path serverSecretsFile = privateDir.resolve("automodpack-secrets.json");
 	public static final Path knownHostsFile = privateDir.resolve("automodpack-known-hosts.json");
+	public static final Path knownHostsBootstrapFile = automodpackDir.resolve("automodpack-bootstrap.json");
+	public static final Path transactionFile = privateDir.resolve("update-transaction.json");
+	public static final Path transactionResultFile = privateDir.resolve("update-transaction-result.json");
+	public static final Path helperDir = cacheDir.resolve("update-helper");
 	public static final Path serverCertFile = privateDir.resolve("cert.crt");
 	public static final Path serverPrivateKeyFile = privateDir.resolve("key.pem");
 
@@ -60,9 +64,6 @@ public class Constants {
 	public static final Path clientConfigFile = automodpackDir.resolve("automodpack-client.json");
 	public static final Path clientSecretsFile = privateDir.resolve("automodpack-client-secrets.json");
 	public static final Path modpacksDir = automodpackDir.resolve("modpacks");
-
-	public static final String clientConfigFileOverrideResource = "overrides-automodpack-client.json";
-	public static String clientConfigOverride; // read from inside a jar file on preload, used instead of clientConfigFile if exists
 
 	public static Path selectedModpackDir;
 

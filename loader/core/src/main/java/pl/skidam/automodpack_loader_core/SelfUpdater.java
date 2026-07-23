@@ -2,26 +2,18 @@ package pl.skidam.automodpack_loader_core;
 
 import static pl.skidam.automodpack_core.Constants.*;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
-import java.util.jar.JarEntry;
-import java.util.jar.JarFile;
-import java.util.jar.JarOutputStream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 import pl.skidam.automodpack_core.config.Jsons;
 import pl.skidam.automodpack_core.loader.LoaderManagerService;
 import pl.skidam.automodpack_core.platforms.ModrinthAPI;
+import pl.skidam.automodpack_core.update.UpdateTransaction;
+import pl.skidam.automodpack_core.update.UpdateTransactionExecutor;
 import pl.skidam.automodpack_core.utils.DownloadSource;
 import pl.skidam.automodpack_core.utils.HashUtils;
-import pl.skidam.automodpack_core.utils.LockFreeInputStream;
 import pl.skidam.automodpack_core.utils.SemanticVersion;
 import pl.skidam.automodpack_core.utils.SmartFileUtils;
 import pl.skidam.automodpack_loader_core.screen.ScreenManager;
@@ -167,88 +159,34 @@ public class SelfUpdater {
 	}
 
 	public static void installModVersion(ModrinthAPI automodpack) {
-		Path automodpackUpdateJar = automodpackDir.resolve(automodpack.fileName());
-		Path newAutomodpackJar;
-
 		try {
+			Path currentJar = THIS_MOD_JAR.toAbsolutePath().normalize();
+			Path modsDirectory = MODS_DIR.toAbsolutePath().normalize();
+			if (!currentJar.getParent().equals(modsDirectory)) throw new IllegalStateException("Loaded AutoModpack JAR is not a direct child of the mods directory");
+			Path targetJar = modsDirectory.resolve(Path.of(automodpack.fileName()).getFileName()).normalize();
+
 			DownloadManager downloadManager = new DownloadManager();
 			new ScreenManager().download(downloadManager, "AutoModpack " + automodpack.fileVersion());
-
-			downloadManager.download(automodpackUpdateJar, automodpack.SHA1Hash(),
+			downloadManager.download(targetJar, automodpack.SHA1Hash(),
 					List.of(new DownloadSource(automodpack.downloadUrl(), DownloadSource.Provider.MODRINTH)), automodpack.fileSize(),
 					() -> LOGGER.info("Downloaded update for AutoModpack."), () -> LOGGER.error("Failed to download update for AutoModpack."));
-
 			downloadManager.joinAll();
 			downloadManager.cancelAllAndShutdown();
 
-			addOverridesToJar(automodpackUpdateJar);
+			Path storeObject = storeDir.resolve(automodpack.SHA1Hash());
+			if (!SmartFileUtils.isValidFile(storeObject, automodpack.fileSize(), automodpack.SHA1Hash()))
+				throw new IllegalStateException("Downloaded official AutoModpack JAR failed verification");
+			String currentHash = HashUtils.getHash(currentJar);
+			if (currentHash == null || !Files.isRegularFile(currentJar)) throw new IllegalStateException("Loaded AutoModpack JAR cannot be verified");
 
-			newAutomodpackJar = THIS_MOD_JAR.getParent().resolve(automodpackUpdateJar.getFileName());
-
-			var updateType = UpdateType.AUTOMODPACK;
-			var relauncher = new ReLauncher(updateType);
-
-			Runnable callback = () -> {
-				SmartFileUtils.executeOrder66(THIS_MOD_JAR);
-				LOGGER.info("Successfully updated AutoModpack! Restarting...");
-			};
-
-			SmartFileUtils.copyFile(automodpackUpdateJar, newAutomodpackJar);
-			SmartFileUtils.executeOrder66(automodpackUpdateJar); // Delete temp file
-
-			relauncher.restart(true, callback);
+			UpdateTransaction transaction = UpdateTransaction.createSelfUpdate(currentJar.getFileName().toString(), targetJar.getFileName().toString(),
+					automodpack.SHA1Hash(), automodpack.fileSize(), currentHash);
+			UpdateTransactionExecutor.Execution execution = UpdateTransactionSupport.executor(transaction).commit(transaction);
+			if (!execution.success()) DetachedUpdateHelper.launch(transaction);
+			LOGGER.info("AutoModpack update transaction {} is ready; restart required", transaction.transactionId);
+			new ReLauncher(UpdateType.AUTOMODPACK).restart(true);
 		} catch (Exception e) {
-			LOGGER.error("Failed to update! " + e);
+			LOGGER.error("Failed to update AutoModpack", e);
 		}
-	}
-
-	public static Optional<InputStream> getJarEntryInputStream(Path jarFilePath, String entryName) throws IOException {
-		try (InputStream fileStream = new LockFreeInputStream(jarFilePath); ZipInputStream zipStream = new ZipInputStream(fileStream)) {
-			ZipEntry entry;
-			while ((entry = zipStream.getNextEntry()) != null) {
-				if (entry.getName().equals(entryName)) { return Optional.of(zipStream); }
-			}
-		}
-
-		return Optional.empty();
-	}
-
-	public static void addOverridesToJar(Path jarFilePath) throws IOException {
-		if (clientConfigOverride == null || clientConfigOverride.isBlank()) { return; }
-
-		if (!Files.isRegularFile(jarFilePath) || !Files.isRegularFile(THIS_MOD_JAR)) {
-			LOGGER.error("Jar file of updated AutoModpack not found!");
-			return;
-		}
-
-		Path tempJarPath = Files.createTempFile("tempAutoModpackJar", ".jar");
-
-		try (JarFile jarFile = new JarFile(jarFilePath.toFile());
-				JarOutputStream tempJarOutputStream = new JarOutputStream(Files.newOutputStream(tempJarPath))) {
-
-			jarFile.stream().forEach(entry -> {
-				try {
-					JarEntry newEntry = new JarEntry(entry.getName());
-					tempJarOutputStream.putNextEntry(newEntry);
-					try (InputStream entryInputStream = jarFile.getInputStream(entry)) {
-						entryInputStream.transferTo(tempJarOutputStream);
-					}
-					tempJarOutputStream.closeEntry();
-				} catch (IOException e) {
-					e.printStackTrace();
-				}
-			});
-
-			Optional<InputStream> txtInputStreamOpt = getJarEntryInputStream(THIS_MOD_JAR, clientConfigFileOverrideResource);
-			if (txtInputStreamOpt.isPresent()) {
-				JarEntry newTxtEntry = new JarEntry(clientConfigFileOverrideResource);
-				tempJarOutputStream.putNextEntry(newTxtEntry);
-				txtInputStreamOpt.get().transferTo(tempJarOutputStream);
-				tempJarOutputStream.closeEntry();
-			}
-		}
-
-		Files.move(tempJarPath, jarFilePath, StandardCopyOption.REPLACE_EXISTING);
-		LOGGER.info("Added config overrides to the updated AutoModpack JAR");
 	}
 }
