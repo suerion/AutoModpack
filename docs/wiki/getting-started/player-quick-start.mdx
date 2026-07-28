@@ -22,7 +22,7 @@ If you're unsure which versions to use, ask the server owner.
 ## Joining a Server
 ------------------------------------
 
-## First Connection
+### First Connection
 
 1. Open Minecraft with only AutoModpack installed in your default `mods` folder.
 2. Click **Multiplayer**.
@@ -30,9 +30,25 @@ If you're unsure which versions to use, ask the server owner.
 
 ## Server Verification
 
-The first time you join an AutoModpack server, AutoModpack verifies the server's identity before downloading any files.
+Depending on how the server is configured, one of the following verification methods is used. In most cases, verification happens automatically and requires no interaction.
 
-Depending on how the server is configured, one of the following verification methods is used:
+## Downloading the Modpack
+
+4. AutoModpack compares your local AutoModpack files with the server's modpack and downloads any missing or updated files.
+5. Confirm the download when prompted.
+6. Wait until the download has finished.
+
+> **Note**
+>
+> If the server requires a different AutoModpack version, AutoModpack automatically installs and uses the required version before continuing.
+
+7. When prompted, close Minecraft.
+8. Start Minecraft again.
+9. Join the server again.
+
+That's it! You're now using the same modpack as the server.
+
+## How Verification Works
 
 ### 1. Trusted Certificate
 
@@ -42,13 +58,13 @@ No confirmation is required.
 
 ### 2. DNSSEC AMP1
 
-If the server publishes its fingerprint using DNSSEC, AutoModpack verifies the server automatically.
+If the server publishes its certificate fingerprint using DNSSEC, AutoModpack verifies the server automatically.
 
 No confirmation is required.
 
 ### 3. Embedded Fingerprint (`#amp1=`)
 
-Some server owners may provide a server address that already contains the server fingerprint.
+Some server owners may provide a server address that already includes the server's certificate fingerprint.
 
 Example:
 
@@ -62,29 +78,19 @@ When joining with one of these addresses, AutoModpack already knows which finger
 
 ### 4. Manual Fingerprint Verification
 
-If none of the automatic verification methods are available, AutoModpack displays the server fingerprint.
+If no automatic verification method is available, the server owner must provide you with the server's certificate fingerprint.
 
-Compare it with the fingerprint provided by the server owner before accepting it.
+Enter the certificate fingerprint provided by the server owner to verify the server and continue downloading the modpack.
 
-This only needs to be done once for each server unless the server fingerprint changes.
+The fingerprint is only required the first time you connect or after the server certificate changes.
 
-## Downloading the Modpack
+## Learn More About Certificate Verification
 
-4. AutoModpack compares your local files with the server's modpack and downloads any missing or updated files.
-5. Confirm the download when prompted.
-6. Wait until the download has finished.
-
-> **Note**
->
-> If the server requires a different AutoModpack version, AutoModpack automatically updates itself before continuing.
-
-7. When prompted, close Minecraft.
-8. Start Minecraft again.
-9. Join the server again.
-
-That's it! You're now using the same modpack as the server.
+[→ Certificate Verification](technical-details/certificate-system)
 
 ## Updating the modpack
+
+Whenever possible, AutoModpack downloads files directly from Modrinth or CurseForge. Files that are not available there are downloaded from the server.
 
 Whenever the server owner updates the modpack, AutoModpack automatically downloads the required changes the next time you connect.
 
