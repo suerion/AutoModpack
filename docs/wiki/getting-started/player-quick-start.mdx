@@ -1,3 +1,113 @@
-ADD HERE ONLY PLAYER HELP,
+------------------------------------
+# Player Quick Start
+------------------------------------
 
-NO TECHNICAL INFORMATIONS
+Joining an AutoModpack server only takes a few steps.
+
+Once AutoModpack is installed, it automatically downloads and manages the files required by the server.
+
+------------------------------------
+## Before you begin
+------------------------------------
+
+Before joining an AutoModpack server, make sure you have:
+
+- The correct Minecraft version
+- The correct mod loader (Fabric, Forge or NeoForge)
+- AutoModpack installed
+
+If you're unsure which versions to use, ask the server owner.
+
+------------------------------------
+## Joining a Server
+------------------------------------
+
+## First Connection
+
+1. Open Minecraft with only AutoModpack installed in your default `mods` folder.
+2. Click **Multiplayer**.
+3. Add your server or use **Direct Connect**.
+
+## Server Verification
+
+The first time you join an AutoModpack server, AutoModpack verifies the server's identity before downloading any files.
+
+Depending on how the server is configured, one of the following verification methods is used:
+
+### 1. Trusted Certificate
+
+If the server uses a trusted TLS certificate, verification happens automatically.
+
+No confirmation is required.
+
+### 2. DNSSEC AMP1
+
+If the server publishes its fingerprint using DNSSEC, AutoModpack verifies the server automatically.
+
+No confirmation is required.
+
+### 3. Embedded Fingerprint (`#amp1=`)
+
+Some server owners may provide a server address that already contains the server fingerprint.
+
+Example:
+
+```text
+play.example.com#amp1=<fingerprint>
+
+192.168.1.100#amp1=<fingerprint>
+```
+
+When joining with one of these addresses, AutoModpack already knows which fingerprint to expect and verifies the server automatically.
+
+### 4. Manual Fingerprint Verification
+
+If none of the automatic verification methods are available, AutoModpack displays the server fingerprint.
+
+Compare it with the fingerprint provided by the server owner before accepting it.
+
+This only needs to be done once for each server unless the server fingerprint changes.
+
+## Downloading the Modpack
+
+4. AutoModpack compares your local files with the server's modpack and downloads any missing or updated files.
+5. Confirm the download when prompted.
+6. Wait until the download has finished.
+
+> **Note**
+>
+> If the server requires a different AutoModpack version, AutoModpack automatically updates itself before continuing.
+
+7. When prompted, close Minecraft.
+8. Start Minecraft again.
+9. Join the server again.
+
+That's it! You're now using the same modpack as the server.
+
+## Updating the modpack
+
+Whenever the server owner updates the modpack, AutoModpack automatically downloads the required changes the next time you connect.
+
+Only files that have changed are downloaded, making updates much faster than downloading the entire modpack again.
+
+## Personal client mods
+
+You can continue using your own client-side mods as long as they are compatible with the server.
+
+Learn more here:
+
+[→ Personal Client Mods](players/personal-client-mods)
+
+## Where are my downloaded files?
+
+AutoModpack stores downloaded files inside its own modpack directory.
+
+Learn more here:
+
+[→ Where are the Downloaded Files?](players/where-are-the-downloaded-files)
+
+## Need help?
+
+If something doesn't work as expected, continue with:
+
+[→ Troubleshooting](troubleshooting/)
