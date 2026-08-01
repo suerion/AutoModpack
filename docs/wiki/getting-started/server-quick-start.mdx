@@ -1,1 +1,224 @@
-ADD HERE THE QUICK START FOR SERVER OWNERS!!!
+------------------------------------
+# Server Quick Start
+------------------------------------
+
+This guide covers the basic server setup for AutoModpack.
+
+Most servers work with the default configuration and require only a few changes before players can join.
+
+If you want to learn more about individual settings, continue with the detailed [Server Configuration](server-owners/server-configuration) guide.
+
+------------------------------------
+## Installation
+------------------------------------
+
+1. Download AutoModpack for your Minecraft version.
+2. Place `automodpack.jar` into your server's `mods` folder.
+3. Start the server once.
+
+AutoModpack automatically creates:
+
+```text
+automodpack/
+├── automodpack-server.json
+├── automodpack_content.json
+└── host-modpack/
+```
+
+------------------------------------
+## Basic Server Configuration
+------------------------------------
+
+The server configuration is located at:
+
+```text
+~/automodpack/automodpack-server.json
+```
+
+For most servers, the default configuration is already sufficient.
+
+Example:
+
+```json
+{
+  "modpackHost": true,
+  "generateModpackOnStart": true,
+  "syncedFiles": [
+    "/mods/*.jar",
+    "/config/**",
+    "/kubejs/**",
+    "!/kubejs/server_scripts/**"
+  ],
+  "allowEditsInFiles": [
+    "/config/**",
+    "/options.txt"
+  ],
+  "autoExcludeServerSideMods": true,
+  "requireAutoModpackOnClient": true
+}
+```
+
+------------------------------------
+### Synced Files
+------------------------------------
+
+`syncedFiles` defines which files are included in your modpack.
+
+Use `!` to exclude files or folders.
+
+Example:
+
+```json
+"syncedFiles": [
+  "/mods/*.jar",
+  "!/mods/server-only*.jar"
+]
+```
+
+------------------------------------
+### Editable Files
+------------------------------------
+
+`allowEditsInFiles` lets players keep personal changes after the initial synchronization.
+
+Example:
+
+```json
+"allowEditsInFiles": [
+  "/config/**",
+  "/options.txt"
+]
+```
+
+If a specific configuration should always stay synchronized, exclude it from the editable paths.
+
+Example:
+
+```json
+"allowEditsInFiles": [
+  "/config/**",
+  "!/config/fancymenu/**"
+]
+```
+
+------------------------------------
+### Overwriting Editable Files
+------------------------------------
+
+`overwriteEditableFiles` updates editable files only after the server version changes.
+
+Example:
+
+```json
+"overwriteEditableFiles": [
+  "/config/fancymenu/**"
+]
+```
+
+------------------------------------
+### Force Copy Files
+------------------------------------
+
+Some mods require files to exist inside Minecraft's standard directories.
+
+Use `forceCopyFilesToStandardLocation` only for those special cases.
+
+```json
+"forceCopyFilesToStandardLocation": [
+  "/mods/example-mod.jar"
+]
+```
+
+------------------------------------
+### Client-only Content
+------------------------------------
+
+The `host-modpack/main` directory allows you to distribute additional client-side files without installing them on the server.
+
+Example:
+
+```text
+automodpack/
+└── host-modpack/
+    └── main/
+        ├── mods/
+        ├── config/
+        ├── resourcepacks/
+        └── shaderpacks/
+```
+
+For example, to distribute a minimap mod only to clients:
+
+```text
+automodpack/host-modpack/main/mods/
+```
+
+------------------------------------
+### Excluding Server-only Mods
+------------------------------------
+
+Server-only mods should be excluded from synchronization.
+
+Example:
+
+```json
+"syncedFiles": [
+  "/mods/*.jar",
+  "!/mods/luckperms*.jar",
+  "!/mods/chunky*.jar"
+]
+```
+
+AutoModpack can also exclude many known server-only mods automatically.
+
+------------------------------------
+## Keeping Your Modpack Updated
+------------------------------------
+
+Whenever synchronized files change:
+
+- Restart the server or regenerate the modpack.
+- Players automatically receive the updated files.
+- Only changed files are downloaded.
+
+Example for always synchronized files:
+
+```json
+"syncedFiles": [
+  "/config/fancymenu/**"
+],
+"allowEditsInFiles": [
+  "/options.txt"
+]
+```
+
+Example for editable files that should only update after server changes:
+
+```json
+"allowEditsInFiles": [
+  "/config/**"
+],
+"overwriteEditableFiles": [
+  "/config/fancymenu/**"
+]
+```
+
+------------------------------------
+## Troubleshooting
+------------------------------------
+
+If something does not work:
+
+- Verify that your server starts correctly without AutoModpack.
+- Check the server log for errors.
+- Make sure the same AutoModpack version is installed where required.
+- Review the compatibility pages for proxies, launchers, and mods if necessary.
+
+------------------------------------
+## Next Step
+------------------------------------
+
+Continue with:
+
+- [→ Creating your First Modpack](server-owners/creating-your-first-modpack)
+- [→ Server Configuration](server-owners/server-configuration)
