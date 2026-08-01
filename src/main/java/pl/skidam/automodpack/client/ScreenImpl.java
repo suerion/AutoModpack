@@ -42,7 +42,7 @@ public class ScreenImpl implements ScreenService {
 
 	@Override
 	public void danger(Object... args) {
-		executeOnClient(() -> Screens.danger(args[0], args[1]));
+		executeOnClient(() -> Screens.danger(args[0]));
 	}
 
 	@Override
@@ -52,7 +52,7 @@ public class ScreenImpl implements ScreenService {
 
 	@Override
 	public void menu(Object... args) {
-		executeOnClient(Screens::menu);
+		executeOnClient(() -> Screens.menu(args.length > 0 ? args[0] : null));
 	}
 
 	@Override
@@ -63,6 +63,11 @@ public class ScreenImpl implements ScreenService {
 	@Override
 	public void validation(Object... args) {
 		executeOnClient(() -> Screens.validation(args[0], args[1], args[2], args[3]));
+	}
+
+	@Override
+	public void waiting() {
+		executeOnClient(Screens::waiting);
 	}
 
 	@Override
@@ -109,8 +114,8 @@ public class ScreenImpl implements ScreenService {
 			Screens.setScreen(new RestartScreen((Path) modpackDir, (UpdateType) updateType, (Changelogs) changelogs));
 		}
 
-		public static void danger(Object parent, Object modpackUpdaterInstance) {
-			Screens.setScreen(new DangerScreen((Screen) parent, (ModpackUpdater) modpackUpdaterInstance));
+		public static void danger(Object modpackUpdaterInstance) {
+			Screens.setScreen(new DangerScreen((ModpackUpdater) modpackUpdaterInstance));
 		}
 
 		public static void error(String... errors) {
@@ -121,12 +126,16 @@ public class ScreenImpl implements ScreenService {
 			Screens.setScreen(new TitleScreen());
 		}
 
-		public static void menu() {
-//            Screens.setScreen(new MenuScreen());
+		public static void menu(Object parent) {
+			Screens.setScreen(ModpackSelectionScreen.forSelectedModpack((Screen) parent));
 		}
 
 		public static void validation(Object parent, Object serverFingerprint, Object validatedCallback, Object canceledCallback) {
 			Screens.setScreen(new FingerprintVerificationScreen((Screen) parent, (String) serverFingerprint, (Runnable) validatedCallback, (Runnable) canceledCallback));
+		}
+
+		public static void waiting() {
+			Screens.setScreen(new PreparingScreen());
 		}
 	}
 }
