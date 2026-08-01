@@ -1,0 +1,106 @@
+------------------------------------
+# Joining a Server
+------------------------------------
+
+Joining an AutoModpack server is more than simply connecting to Minecraft.
+
+Before you enter the world, AutoModpack performs several checks to ensure that your client matches the server's modpack and that the download source can be trusted.
+
+------------------------------------
+## What Happens When You Join?
+------------------------------------
+
+Player clicks Join
+        │
+        ↓
+Connect to the Minecraft server
+        │
+        ↓
+Verify the server identity
+        │
+        ↓
+Check the AutoModpack version
+        │
+        ↓
+Compare the local modpack
+        │
+        ↓
+Download missing or updated files
+        │
+        ↓
+Synchronize supported files (if required)
+        │
+        ↓
+Restart Minecraft (if required)
+        │
+        ↓
+Join the server
+
+------------------------------------
+## Server Verification
+------------------------------------
+
+Before downloading any files, AutoModpack verifies the server's identity.
+
+Depending on the server configuration, this may use:
+
+- Trusted TLS certificates
+- DNSSEC AMP1
+- Embedded fingerprints
+- Manual fingerprint verification
+
+Learn more:
+
+[→ Certificate Verification](technical-details/certificate-system)
+
+------------------------------------
+## AutoModpack Version Check
+------------------------------------
+
+Before downloading the modpack, AutoModpack checks whether the required AutoModpack version is installed.
+
+If necessary, AutoModpack automatically downloads and switches to the required version before continuing.
+
+------------------------------------
+## Comparing the Modpack
+------------------------------------
+
+AutoModpack compares your local files with the modpack provided by the server.
+
+Only files that are missing or have changed need to be downloaded or synchronized.
+
+This makes updates much faster than downloading the entire modpack again.
+
+------------------------------------
+## Download Sources
+------------------------------------
+
+Whenever possible, AutoModpack downloads files directly from Modrinth or CurseForge.
+
+Files that are not available there are downloaded from the server's AutoModpack host.
+
+This reduces server bandwidth, improves download performance, and allows many files to be downloaded directly from their original source.
+
+------------------------------------
+## Restarting Minecraft
+------------------------------------
+
+Not every update requires restarting Minecraft.
+
+If only synchronized files such as configuration files, resource packs, or other supported content have changed, AutoModpack can synchronize them automatically according to the server configuration.
+
+A restart is only required when changes cannot be applied while Minecraft is running, such as when mods need to be added, removed, or updated.
+
+If you experience connection issues, visual problems, missing features, or other unexpected behavior after joining a server, restarting Minecraft is often the first recommended troubleshooting step.
+
+When a restart is required, AutoModpack will notify you.
+
+After restarting Minecraft, simply join the server again.
+
+------------------------------------
+## Future Connections
+------------------------------------
+
+The next time you join the same server, AutoModpack repeats the verification and comparison process.
+
+Since only changed files are downloaded or synchronized, reconnecting is usually much faster than the initial download.

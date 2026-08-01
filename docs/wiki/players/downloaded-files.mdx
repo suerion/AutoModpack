@@ -1,0 +1,198 @@
+------------------------------------
+# Where are the Downloaded Files?
+------------------------------------
+
+AutoModpack stores downloaded modpacks inside its own directory instead of placing every file directly into your default Minecraft folders.
+
+This keeps server modpacks separate from your personal files and allows AutoModpack to update them safely.
+
+------------------------------------
+## Default AutoModpack Folder
+------------------------------------
+
+All AutoModpack files are stored inside:
+
+```text
+~/automodpack/
+```
+
+Downloaded modpacks are stored inside:
+
+```text
+~/automodpack/modpacks/
+```
+
+Each downloaded modpack is stored separately inside this directory.
+
+A downloaded modpack follows a structure similar to this:
+
+```text
+~/automodpack/
+└── modpacks/
+    └── <Modpack Name>/
+        └── <Group Name>/
+            ├── mods/
+            ├── config/
+            ├── resourcepacks/
+            ├── shaderpacks/
+            └── ...
+```
+
+> **Note**
+>
+> Support for multiple groups will be available in a future AutoModpack update. Depending on your installed version, the `<Group Name>` folder may not exist yet.
+
+------------------------------------
+## What Belongs in the Default Mods Folder?
+------------------------------------
+
+In most cases, you only need AutoModpack itself inside your default Minecraft `mods` folder.
+
+Example:
+
+```text
+.minecraft/
+└── mods/
+    └── automodpack.jar
+```
+
+The mods downloaded from the server are normally loaded directly from AutoModpack's own modpack directory.
+
+Example:
+
+```text
+~/automodpack/modpacks/<Modpack Name>/<Group Name>/mods/
+```
+
+This keeps the server's mods separate from mods you installed yourself.
+
+------------------------------------
+## Other Downloaded Files
+------------------------------------
+
+Configuration files, resource packs, shader packs, and other synchronized content are also stored inside the downloaded AutoModpack modpack.
+
+Example:
+
+```text
+~/automodpack/modpacks/<Modpack Name>/<Group Name>/
+├── config/
+├── resourcepacks/
+├── shaderpacks/
+└── ...
+```
+
+Unlike mods, these files may need to be synchronized to the corresponding folders inside your default Minecraft instance, depending on the server configuration.
+
+For example:
+
+```text
+Downloaded AutoModpack modpack
+└── config/
+        │
+        ▼
+.minecraft/
+└── config/
+```
+
+Depending on the server configuration, the same process can be used for folders such as:
+
+```text
+.minecraft/
+├── config/
+├── resourcepacks/
+├── shaderpacks/
+└── ...
+```
+
+AutoModpack manages this synchronization automatically.
+
+------------------------------------
+## Exceptions for Incompatible Mods
+------------------------------------
+
+Some mods or libraries must be loaded from the default Minecraft `mods` folder because they do not support being loaded from AutoModpack's separate modpack directory.
+
+In these cases, the server owner can configure AutoModpack to copy the affected files into the default `mods` folder by using `forceCopyFilesToStandardLocation`.
+
+You normally do not need to copy these files manually. If a server requires such a mod, AutoModpack handles it according to the server configuration.
+
+------------------------------------
+## Why Are Mods Stored Separately?
+------------------------------------
+
+Keeping the server's mods in a separate directory has several advantages:
+
+1. Server modpack files do not get mixed with your personal client-side mods.
+2. AutoModpack can update files before the mod loader loads them.
+3. Broken or incompatible server updates can often be corrected without manually removing files from your default `mods` folder.
+4. It is easier to see which mods belong to you and which were provided by the server.
+
+The basic structure looks like this:
+
+```text
+.minecraft/
+├── mods/
+│   └── automodpack.jar
+│
+└── config/
+      ▲
+      │ synchronized when required
+      │
+~/automodpack/
+└── modpacks/
+    └── <Modpack Name>/
+        └── <Group Name>/
+            ├── mods/          ← loaded directly
+            ├── config/
+            ├── resourcepacks/
+            └── shaderpacks/
+```
+
+------------------------------------
+## Duplicate Mods
+------------------------------------
+
+To prevent conflicts, AutoModpack automatically detects duplicate mods.
+
+If the same mod exists both inside the downloaded AutoModpack modpack and your default Minecraft `mods` folder, AutoModpack may automatically remove the duplicate copy from the default `mods` folder.
+
+This is expected behavior and ensures that only one version of the mod is loaded.
+
+> **Warning**
+>
+> Some launchers, such as CurseForge, may automatically restore removed mods as part of their repair or synchronization process.
+>
+> If this happens, AutoModpack may remove the restored duplicate again, which can result in an update or restart loop.
+>
+> If you experience this behavior, remove the duplicate mod from your default `mods` folder or disable the launcher's automatic repair feature before joining the server again.
+
+Your own compatible client-side mods that are not part of the server's modpack are not affected and can remain inside your default Minecraft `mods` folder.
+
+------------------------------------
+## Can I Delete the Downloaded Modpack?
+------------------------------------
+
+Yes, but AutoModpack will download it again the next time you join the server.
+
+Only delete the modpack folder when troubleshooting or when you no longer use that server.
+
+Do not delete individual files while Minecraft is running.
+
+------------------------------------
+## Personal Client Mods
+------------------------------------
+
+Your own compatible client-side mods can remain inside the default Minecraft `mods` folder next to AutoModpack.
+
+Learn more here:
+
+[→ Personal Client Mods](players/personal-client-mods)
+
+------------------------------------
+## Technical Folder Structure
+------------------------------------
+
+For a complete explanation of the client and server folder structure, continue with:
+
+[→ Folder Structure](references/folder-structure)
