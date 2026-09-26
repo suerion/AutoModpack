@@ -2,7 +2,7 @@ name: Release
 
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
-      && format('Manual release for {0}{1}', inputs.target_release_tag, inputs.target_subproject && format(' ({0})', inputs.target_subproject) || '')
+      && format('Manual release for {0}', inputs.target_release_tag)
       || github.event.release.name }}
 
 on:
@@ -10,11 +10,6 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
-      target_subproject:
-        description: Comma-separated targets to publish; empty publishes all
-        type: string
-        required: false
-        default: ''
       target_release_tag:
         description: Existing GitHub release tag to publish to
         type: string
@@ -30,7 +25,7 @@ concurrency:
 jobs:
   prepare:
     name: Resolve release and source
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       tag: ${{ steps.release.outputs.tag }}
@@ -74,13 +69,11 @@ jobs:
           SOURCE_BRANCH: ${{ steps.release.outputs.source_branch }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           TAG: ${{ steps.release.outputs.tag }}
-          TARGETS: ${{ inputs.target_subproject || 'all' }}
         run: |
           {
             echo '## Release parameters'
             echo "- Destination tag: \`$TAG\`"
             echo "- Source: \`$SOURCE_BRANCH\` at \`$SOURCE_SHA\`"
-            echo "- Publish targets: \`$TARGETS\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   build:
@@ -89,13 +82,12 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       source_sha: ${{ needs.prepare.outputs.source_sha }}
-      targets: ${{ inputs.target_subproject }}
       artifact_retention_days: 7
 
   verify:
     name: Verify release version
     needs: [prepare, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Match build version to destination tag
@@ -115,7 +107,7 @@ jobs:
   publish:
     name: Publish ${{ matrix.subproject }}
     needs: [prepare, build, verify]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write
@@ -143,9 +135,10 @@ jobs:
           github-token: ${{ github.token }}
 
           files: build-artifacts/${{ matrix.file }}
-          name: ${{ format('{0} {1} {2}', matrix.mod_name, matrix.mod_version, matrix.loader) }}
+          name: ${{ matrix.name }}
           version: ${{ matrix.mod_version }}
-          version-type: release
+          # a hyphen after the number (4.0.0-beta44, 5.0.0-rc.1) marks a prerelease channel
+          version-type: ${{ contains(matrix.mod_version, '-') && 'beta' || 'release' }}
           loaders: ${{ matrix.loader }}
           game-versions: ${{ matrix.publish_versions }}
           game-version-filter: any

@@ -3,27 +3,41 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
+import signal
 import shutil
+import subprocess
 import sys
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import docker as docker_py
+from filelock import Timeout
 
+from .cache import deduplicate_asset_objects
+from .client_steps import parse_loss, parse_netem
 from .config import (
     REPO_ROOT,
     ROOT,
+    connection_path_variants,
     load_macros,
     load_scenarios,
     load_settings,
     load_targets,
     scenario_matches_target,
+    server_cache_volume,
 )
 from .runner import run_case
-from .validate import validate_scenario
+from .supervisor import RunSupervisor, reap_orphaned_scopes, server_cache_lock
+from .validate import CONNECTION_MODES, validate_scenario
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _interrupt_on_termination(_signum, _frame) -> None:
+    raise KeyboardInterrupt
 
 
 def _resolve_settings_path(s: dict, key: str, default: str) -> Path:
@@ -32,18 +46,109 @@ def _resolve_settings_path(s: dict, key: str, default: str) -> Path:
     return (REPO_ROOT / p).resolve() if not p.is_absolute() else p.resolve()
 
 
-def _kill_amp_containers() -> None:
+def _stop_gradle_daemons() -> None:
+    gradlew = REPO_ROOT / "gradlew"
+    if not os.access(gradlew, os.X_OK):
+        return
+    try:
+        subprocess.run([str(gradlew), "--stop"], cwd=REPO_ROOT, check=False, capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _cleanup_run_resources(resource_scope: str) -> None:
+    prefix = f"amp-{resource_scope}-"
     client = docker_py.from_env()
-    for c in client.containers.list(all=True, filters={"name": "amp-"}):
+    for c in client.containers.list(all=True):
+        if not c.name.startswith(prefix):
+            continue
         try:
             c.remove(force=True)
         except Exception:
             pass
-    for n in client.networks.list(filters={"name": "amp-"}):
+    for n in client.networks.list():
+        if not n.name.startswith(prefix):
+            continue
         try:
             n.remove()
         except Exception:
             pass
+
+
+def _matrix_payload(selected: list, results: dict, interrupted: bool) -> dict:
+    expected = [target.id for target in selected]
+    terminal = dict(results)
+    for target_id in expected:
+        if target_id not in terminal:
+            terminal[target_id] = {
+                "target": target_id,
+                "scenario": "?",
+                "ok": False,
+                "duration": 0,
+                "error": "Case did not produce a terminal result",
+                "steps": [],
+            }
+    complete = set(terminal) == set(expected) and len(terminal) == len(expected)
+    return {"ok": not interrupted and complete and all(result.get("ok", False) for result in terminal.values()), "results": [terminal[target_id] for target_id in expected]}
+
+
+def _write_results(path: Path, payload: dict) -> None:
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _server_cache_guard(target, variants, settings):
+    """A held lock keeps two concurrent runs from sharing one server cache volume and corrupting each other's world."""
+    sc = variants[0].get("serverCache") or settings.get("serverCache", {})
+    if not sc.get("enabled", True):
+        return None
+    volume = server_cache_volume(target.id, sc.get("volumePrefix", "amp-server-cache"))
+    lock = server_cache_lock(volume)
+    while True:
+        try:
+            lock.acquire(timeout=5)
+            return lock
+        except Timeout:
+            print(f"[wait] {target.id}: server cache is in use by another run; waiting", flush=True)
+
+
+def _run_target_cases(target, variants, *, out_dir, artifact_dir, client_image, settings, resource_scope, netem=None, loss="", server_netem=None):
+    lock = _server_cache_guard(target, variants, settings)
+    try:
+        case_results = [
+            run_case(
+                target,
+                deepcopy(variant),
+                out_dir=out_dir,
+                artifact_dir=artifact_dir,
+                client_image=client_image,
+                settings=settings,
+                resource_scope=resource_scope,
+                netem=netem,
+                loss=loss,
+                server_netem=server_netem,
+            )
+            for variant in variants
+        ]
+    finally:
+        if lock is not None:
+            lock.release()
+    if len(case_results) == 1:
+        return case_results[0]
+    failures = [
+        f"{result.get('connectionMode', result.get('scenario', '?'))}: {result.get('error', 'failed')}"
+        for result in case_results
+        if not result.get("ok", False)
+    ]
+    return {
+        "target": target.id,
+        "scenario": variants[0].get("id", "?"),
+        "ok": all(result.get("ok", False) for result in case_results),
+        "duration": sum(float(result.get("duration", 0)) for result in case_results),
+        "connectionPaths": case_results,
+        "error": "; ".join(failures) if failures else None,
+    }
 
 
 def _cmd_verbs() -> int:
@@ -67,6 +172,14 @@ def _cmd_validate(scenario_name: str | None) -> int:
     macros = load_macros()
     scenarios = load_scenarios()
     targets = load_targets()
+    settings = load_settings()
+    if scenario_name in (None, "all"):
+        if "all" not in scenarios:
+            print("FAIL release gate: scenarios/all.yaml is missing")
+            return 1
+        if str(settings.get("run", {}).get("scenario", "")) != "all":
+            print("FAIL release gate: settings.yaml run.scenario must be 'all'")
+            return 1
     if scenario_name:
         if scenario_name not in scenarios:
             print(f"No such scenario: {scenario_name}", file=sys.stderr)
@@ -86,13 +199,13 @@ def _cmd_validate(scenario_name: str | None) -> int:
 
 
 def _select_targets(targets: dict, target_name: str, scenario: dict) -> tuple[list, list]:
-    requested = list(targets.values()) if target_name == "all" else [targets[target_name]]
+    requested = list(targets.values()) if target_name == "all" else [targets[name.strip()] for name in target_name.split(",") if name.strip()]
     return requested, [t for t in requested if scenario_matches_target(scenario, t)]
 
 
 def _selection_defaults(settings: dict) -> tuple[str, str]:
     run = settings.get("run", {})
-    return str(run.get("scenario", "sync")), str(run.get("target", "all"))
+    return str(run.get("scenario", "all")), str(run.get("target", "all"))
 
 
 def _cmd_targets(scenario_name: str | None, target_name: str | None) -> int:
@@ -127,7 +240,18 @@ def main(argv: list[str] | None = None) -> int:
     run_p = sub.add_parser("run")
     run_p.add_argument("--target")
     run_p.add_argument("--scenario")
+    run_p.add_argument("--connection-path", choices=sorted(CONNECTION_MODES), type=str.upper,
+                       help="Run one connection path (e.g. HOLEPUNCH) instead of the scenario's full matrix")
     run_p.add_argument("--jobs", type=int)
+    run_p.add_argument("--netem", type=parse_netem, metavar="delay=300ms,rate=5mbit",
+                       help="Shape the client container's eth0 with a tc netem qdisc (bridge networking only), "
+                            "e.g. delay=300ms,rate=5mbit")
+    run_p.add_argument("--loss", type=parse_loss, metavar="1%%",
+                       help="Drop this percentage of the server's outgoing segments with a netem loss qdisc "
+                            "(bridge networking only) - the download's data direction")
+    run_p.add_argument("--server-netem", type=parse_netem, metavar="delay=300ms,rate=5mbit",
+                       help="Shape the SERVER container's eth0 with a tc netem qdisc (bridge networking only): "
+                            "delay/rate on the download's data direction; shares the one root qdisc with --loss")
     run_p.add_argument("--docker-uid", type=int)
     run_p.add_argument("--docker-gid", type=int)
     run_p.add_argument("--artifact-dir", type=Path)
@@ -136,6 +260,9 @@ def main(argv: list[str] | None = None) -> int:
 
     clean = sub.add_parser("clean")
     clean.add_argument("--out-dir", type=Path)
+    clean.add_argument("--stop-daemons", action="store_true",
+                       help="Also stop Gradle daemons. Off by default: gradle --stop kills daemons for every "
+                            "project of this Gradle user home, including builds another checkout is running.")
 
     sub.add_parser("verbs", help="List available scenario verbs and condition keys")
 
@@ -170,11 +297,18 @@ def main(argv: list[str] | None = None) -> int:
             buildargs["HEADLESSMC_REPO"] = str(hmc["repo"])
         if hmc.get("ref"):
             buildargs["HEADLESSMC_REF"] = str(hmc["ref"])
-        docker_py.from_env().images.build(
+        images = docker_py.from_env().images
+        images.build(
             path=str(ROOT / "docker" / "client"),
-            dockerfile=str(ROOT / "docker" / "client" / "Dockerfile"),
+            dockerfile="Dockerfile",
             tag=img,
             buildargs=buildargs,
+            rm=True,
+        )
+        images.build(
+            path=str(ROOT / "docker" / "static-host"),
+            dockerfile="Dockerfile",
+            tag=str(s.get("images", {}).get("staticHost", "automodpack-autotest-static-host:local")),
             rm=True,
         )
         return 0
@@ -187,6 +321,9 @@ def main(argv: list[str] | None = None) -> int:
             else args.out_dir.resolve()
         )
         shutil.rmtree(out_dir, ignore_errors=True)
+        if args.stop_daemons:
+            _stop_gradle_daemons()
+        reap_orphaned_scopes()
         return 0
 
     # --- run ---
@@ -229,6 +366,12 @@ def main(argv: list[str] | None = None) -> int:
     if not selected:
         print("No targets in scope for this scenario", file=sys.stderr)
         return 1
+    variants = connection_path_variants(scenario)
+    if args.connection_path:
+        variants = [v for v in variants if str(v.get("connectionPath", {}).get("mode", "")).upper() == args.connection_path]
+        if not variants:
+            print(f"Scenario {scenario_name!r} declares no {args.connection_path} connection path", file=sys.stderr)
+            return 1
 
     out_dir = (
         _resolve_settings_path(s, "outDir", "out")
@@ -244,23 +387,42 @@ def main(argv: list[str] | None = None) -> int:
         s.get("images", {}).get("client", "automodpack-autotest-client:local")
     )
     out_dir.mkdir(parents=True, exist_ok=True)
+    _stop_gradle_daemons()
+    reap_orphaned_scopes()
+    asset_cache = deduplicate_asset_objects(out_dir.parent / ".hmc-cache")
+    if asset_cache.linked_files or asset_cache.invalid_objects or asset_cache.link_failures:
+        logger.info(
+            "HMC assets: linked %d duplicates, reclaimed %.2f GiB, invalid=%d, link failures=%d",
+            asset_cache.linked_files,
+            asset_cache.reclaimed_bytes / (1024 ** 3),
+            asset_cache.invalid_objects,
+            asset_cache.link_failures,
+        )
 
     results: dict = {}
     interrupted = False
+    resource_scope = secrets.token_hex(4)
+    supervisor = RunSupervisor(resource_scope)
     try:
         executor = ThreadPoolExecutor(
             max_workers=max(1, args.jobs or rc.get("jobs", 1))
         )
+        previous_sigterm_handler = signal.signal(signal.SIGTERM, _interrupt_on_termination)
+        task_map = {}
         try:
             task_map = {
                 executor.submit(
-                    run_case,
+                    _run_target_cases,
                     t,
-                    scenario,
+                    variants,
                     out_dir=out_dir,
                     artifact_dir=artifact_dir,
                     client_image=client_image,
                     settings=s,
+                    resource_scope=resource_scope,
+                    netem=args.netem,
+                    loss=args.loss,
+                    server_netem=args.server_netem,
                 ): t
                 for t in selected
             }
@@ -270,6 +432,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"{'PASS' if r['ok'] else 'FAIL'} {r['target']} {r.get('duration', 0):.1f}s"
                 )
+                for path_result in r.get("connectionPaths", [r] if r.get("connectionMode") else []):
+                    print(
+                        f"  {'PASS' if path_result['ok'] else 'FAIL'} {path_result.get('connectionMode', path_result.get('scenario', '?'))} "
+                        f"{path_result.get('duration', 0):.1f}s"
+                    )
                 if r.get("error"):
                     print(f"  {r['error']}", file=sys.stderr)
 
@@ -279,22 +446,25 @@ def main(argv: list[str] | None = None) -> int:
             for ff in task_map:
                 ff.cancel()
             try:
-                _kill_amp_containers()
+                _cleanup_run_resources(resource_scope)
             except KeyboardInterrupt:
                 print("Force exit.", file=sys.stderr)
                 os._exit(1)
             print("Cleanup complete.", file=sys.stderr)
 
         finally:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
             executor.shutdown(wait=False)
-            ok = all(r.get("ok", False) for r in results.values())
-            (out_dir / "results.json").write_text(
-                json.dumps({"ok": ok, "results": list(results.values())}, indent=2)
-            )
+            payload = _matrix_payload(selected, results, interrupted)
+            ok = payload["ok"]
+            _write_results(out_dir / "results.json", payload)
             if interrupted:
+                supervisor.close()
                 os._exit(1)
 
+        supervisor.close()
         return 0 if ok else 1
 
     except KeyboardInterrupt:
+        supervisor.close()
         os._exit(1)

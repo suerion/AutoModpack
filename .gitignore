@@ -36,15 +36,18 @@ output/
 .metadata
 
 .architectury-transformer
-/Merged/
 /merged/
 /core/automodpack/
-
-dupes
 
 # python
 
 __pycache__/
 *.egg-info/
 autotester/out/
+autotester/out-*/
 autotester/.hmc-cache/
+
+bench/raw/
+
+# The generated bench scenario (autotester/scenarios/bench.yaml) is built locally by bench/gen_scenarios.py.
+autotester/scenarios/bench.yaml

@@ -1,21 +1,27 @@
 package pl.skidam.automodpack_core.protocol;
 
+import static pl.skidam.automodpack_core.Constants.AM_VERSION;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.*;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Locale;
 
 import javax.security.auth.x500.X500Principal;
@@ -26,36 +32,89 @@ import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.operator.ContentSigner;
 
-import pl.skidam.automodpack_core.utils.LockFreeInputStream;
-import pl.skidam.automodpack_core.utils.SmartFileUtils;
-
 public class NetUtils {
+	public static final String USER_AGENT = "github/skidamek/automodpack/" + AM_VERSION;
+	public static final Duration NETWORK_TIMEOUT = Duration.ofSeconds(15);
+	// The configured-connection read deadline also guards bulk file transfers, where legitimate
+	// flow-control pauses outlast a connect-grade deadline. It only has to catch a dead peer, not
+	// a slow pipe, so it sits far past any healthy inter-frame gap.
+	public static final Duration TRANSFER_IDLE_TIMEOUT = Duration.ofSeconds(60);
+	// The transfer write-stall tripwire: how long a frame may sit on the socket with zero drain
+	// progress before the peer is declared gone. Only a peer that stopped reading entirely can trip
+	// it - a live link resets the window with every completed write, and at the receipted drain
+	// floor (the 20-client share of a 5 Mbps uplink, ~31 KB/s per client) a STREAM_WRITE_BYTES write
+	// completes at least every ~17 s, 5x inside this window. A genuinely dead peer also surfaces
+	// through its own 60 s read deadline closing the socket, so this fuse is never the first thing
+	// to fire on a healthy connection. This 20-client envelope is load-bearing for the client's
+	// trickle fuse floor (TAKE_RATE_FLOOR_BYTES_PER_SECOND): changing it requires re-deriving that floor.
+	public static final Duration TRANSFER_WRITE_STALL_TIMEOUT = Duration.ofSeconds(90);
+	// The idle reap for public contract connections, in seconds of no reads and no writes. It sits far past any
+	// client's keep-alive reuse window while staying inside a minute-scale patience for silent sockets, and a streamed
+	// response completes a STREAM_WRITE_BYTES write at least every ~17 s at the drain floor (~31 KB/s per client),
+	// 3.5x inside this window - so the reap never interrupts a live transfer. The same envelope is load-bearing for
+	// the client's trickle fuse floor (TAKE_RATE_FLOOR_BYTES_PER_SECOND): changing it requires re-deriving that floor.
+	public static final int HTTP_IDLE_REAP_SECONDS = 60;
+	// The client's trickle fuse floor: a take draining under this rate is fused past its takeBudgetNanos, counted from
+	// the take's FIRST drained byte - queueing behind a lane's serially served predecessors is the flow control working,
+	// and only an actively draining take can prove a trickle. The floor sits just below the documented per-lane
+	// congested share: 6.25 KiB/s = 5 mbit / 20 clients / 5 lanes, where a 4 MiB take needs ~655 s - at the old
+	// 16 KiB/s floor that regime mass-failed against its 256 s budget. 4 KiB/s gives a uniform 1.56x margin because
+	// takeBudgetNanos is proportional above the 90 s stall floor, and it still holds ~30 clients on the reference
+	// uplink: the 30-client share is 5 mbit / 30 clients / 5 lanes = ~4.2 KiB/s per lane, just above the floor. The
+	// trade, said out loud: a 5 KiB/s dripping host now completes a 4 MiB take in ~819 s (~14 minutes) -
+	// slow-but-completing with cancel is the mitigation, genuinely dead peers still die at the 60 s read deadline,
+	// and this fuse is a long-tail backstop against sub-floor drips, not a fast-fail.
+	public static final int TAKE_RATE_FLOOR_BYTES_PER_SECOND = 4 * 1024;
+	// Pre-configuration keepalive cadence: NAT mappings and holepunch relay bindings typically decay after 30-60s of
+	// silence, so a 20s heartbeat sits well inside that band while costing the parked client one tiny ranged GET.
+	public static final Duration PRE_CONFIGURATION_KEEPALIVE_INTERVAL = Duration.ofSeconds(20);
+	public static final int NETWORK_TIMEOUT_MILLIS = Math.toIntExact(NETWORK_TIMEOUT.toMillis());
+	public static final int TRANSFER_IDLE_TIMEOUT_MILLIS = Math.toIntExact(TRANSFER_IDLE_TIMEOUT.toMillis());
 
-	// Magic numbers
 	public static final int MAGIC_AMMH = 0x414D4D48;
 	public static final int MAGIC_AMOK = 0x414D4F4B;
 
-	// Protocol versions
-	public static final byte LATEST_SUPPORTED_PROTOCOL_VERSION = 0x01;
+	// The ranged-GET unit the client tiles objects with; changing it changes request granularity on the client's
+	// lanes. Per-request overhead at this size is noise - a few hundred bytes of headers and one seek per 4 MiB - so
+	// the unit is sized by the wire, not by either end's buffers. The server's streamed-write granularity is
+	// STREAM_WRITE_BYTES below.
+	public static final int WIRE_CHUNK_BYTES = 4 * 1024 * 1024; // 4 MiB
 
-	// Message types and configuration message types should not overlap
-	// Message types
-	public static final byte ECHO_TYPE = 0x00;
-	public static final byte FILE_REQUEST_TYPE = 0x01;
-	public static final byte FILE_RESPONSE_TYPE = 0x02;
-	public static final byte REFRESH_REQUEST_TYPE = 0x03;
-	public static final byte END_OF_TRANSMISSION = 0x04;
-	public static final byte ERROR = 0x05;
+	// The per-connection unsettled-bytes pipeline window, replacing the old fixed 8-deep cap (8 takes = 32 MiB, which
+	// made a pack of tiny files pay one round trip per 40 files). Four 4 MiB takes - the largest take - may sit
+	// unsettled per lane, so five lanes hold 80 MiB: 2.1x the 37.5 MB bandwidth-delay product of 1 Gbit at 300 ms
+	// and far above the reference 5 mbit envelope's BDP, while a pack of 16 KiB files still fits a whole lane's
+	// window thousands of requests over and drains in one round-trip generation (the tiny-files bench: 800 files,
+	// 300 ms delay, ~2 round-trip generations). The size is also the loss guardrail: every dropped segment stalls
+	// exactly the bytes queued behind it, so a deep lane queue turns one lost packet into tens of megabytes of
+	// delayed delivery and multi-megabyte restarts - measured at 1% loss, 64 MiB lanes downloaded the reference
+	// pack in ~227 s where 16 MiB lanes with the adaptive take bound below return to the low 130s. The count
+	// tripwire beside it keeps the bookkeeping bounded.
+	public static final long PIPELINE_WINDOW_BYTES = 16L * 1024 * 1024;
 
-	// Configuration message types
-	public static final byte CONFIGURATION_ECHO_TYPE = 0x40;
-	public static final byte CONFIGURATION_COMPRESSION_TYPE = 0x41;
-	public static final byte CONFIGURATION_CHUNK_SIZE_TYPE = 0x42;
+	// The per-connection count tripwire beside the byte window: 5 KB takes reach 10 MB unsettled per lane, so five
+	// lanes hold 50 MB - above the 1 Gbit/300 ms BDP even for that smallest realistic shape - while per-lane
+	// bookkeeping (futures, per-request state) stays around 2 MB. Good components never touch it.
+	public static final int PIPELINE_MAX_REQUESTS = 2048;
 
-	// Chunk size
-	public static final int DEFAULT_CHUNK_SIZE = 256 * 1024; // 256 KB
-	public static final int MIN_CHUNK_SIZE = 8 * 1024; // 8 KB
-	public static final int MAX_CHUNK_SIZE = 512 * 1024; // 512 KB
+	// The server's streamed-write granularity. The idle reap and the stall fuse see write COMPLETIONS, so the chunk
+	// must be small enough that a draining client keeps completing writes: at the receipted drain floor - the
+	// 20-client share of a 5 Mbps uplink, ~31 KB/s per client - a 512 KiB write completes at least every ~17 s,
+	// 3.5x inside the 60 s reap and 5x inside the 90 s stall fuse. A 4 MiB chunk would need ~135 s and reap live
+	// transfers.
+	public static final int STREAM_WRITE_BYTES = 512 * 1024;
+
+	// The client's per-response read buffer, deliberately not the transfer unit: a 512 KiB read costs a syscall per
+	// ~5 ms of drain at 100 MB/s, and five lanes pin 2.5 MiB of heap instead of 20.
+	public static final int READ_BUFFER_BYTES = 512 * 1024;
+
+	// The server queues streamed response bytes ahead of the peer's drain: writes pause at the high watermark, resume
+	// below the low one, so compression overlaps the wire. The receipt is per connection and the server hosts every
+	// client: against the reference envelope (5 Mbps uplink, 300 ms RTT, BDP ≈ 187 KB) a 512 KiB queue holds ~2.7 BDP,
+	// which is everything the pipe can absorb, and a full pool of 20 clients × 5 lanes queues ≤ 50 MiB on top of the
+	// one 4 MiB chunk each stream holds transiently - where a 4 MiB watermark queued ~400 MiB across the same pool.
+	public static final int WRITE_BUFFER_LOW_WATER = 256 * 1024;
+	public static final int WRITE_BUFFER_HIGH_WATER = 512 * 1024;
 
 	private static final String SIGNATURE_ALGORITHM = "SHA256withRSA";
 	private static final AlgorithmIdentifier SIGNATURE_ALGORITHM_IDENTIFIER = new AlgorithmIdentifier(PKCSObjectIdentifiers.sha256WithRSAEncryption, DERNull.INSTANCE);
@@ -81,6 +140,11 @@ public class NetUtils {
 	public static String shortenFingerprint(String fingerprint) {
 		if (fingerprint == null || fingerprint.length() <= 19) return fingerprint;
 		return fingerprint.substring(0, 8) + "…" + fingerprint.substring(fingerprint.length() - 8);
+	}
+
+	public static String shortenFingerprint(String fingerprint, int visibleCharactersPerSide) {
+		if (fingerprint == null || visibleCharactersPerSide < 1 || fingerprint.length() <= visibleCharactersPerSide * 2 + 3) return fingerprint;
+		return fingerprint.substring(0, visibleCharactersPerSide) + "..." + fingerprint.substring(fingerprint.length() - visibleCharactersPerSide);
 	}
 
 	public static KeyPair generateKeyPair() throws Exception {
@@ -143,13 +207,13 @@ public class NetUtils {
 
 	public static void saveCertificate(X509Certificate cert, Path path) throws Exception {
 		String certPem = "-----BEGIN CERTIFICATE-----\n" + formatBase64(cert.getEncoded()) + "-----END CERTIFICATE-----\n";
-		SmartFileUtils.createParentDirs(path);
-		Files.writeString(path, certPem);
+		if (path.getParent() != null) Files.createDirectories(path.getParent());
+		Files.writeString(path, certPem, StandardCharsets.UTF_8);
 	}
 
 	public static X509Certificate loadCertificate(Path path) throws Exception {
 		if (!Files.exists(path)) return null;
-		try (InputStream in = new LockFreeInputStream(path)) {
+		try (InputStream in = Files.newInputStream(path)) {
 			CertificateFactory cf = CertificateFactory.getInstance("X.509");
 			return (X509Certificate) cf.generateCertificate(in);
 		}
@@ -158,8 +222,52 @@ public class NetUtils {
 	public static void savePrivateKey(PrivateKey key, Path path) throws Exception {
 		PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(key.getEncoded());
 		String keyPem = "-----BEGIN PRIVATE KEY-----\n" + formatBase64(keySpec.getEncoded()) + "-----END PRIVATE KEY-----\n";
-		SmartFileUtils.createParentDirs(path);
-		Files.writeString(path, keyPem);
+		if (path.getParent() != null) Files.createDirectories(path.getParent());
+		Files.writeString(path, keyPem, StandardCharsets.UTF_8);
+	}
+
+	/** Closes and swallows the failure: teardown paths never have a better story than the error they are already telling. */
+	public static void closeQuietly(AutoCloseable closeable) {
+		if (closeable == null) return;
+		try {
+			closeable.close();
+		} catch (Exception ignored) {
+		}
+	}
+
+	/** Reads the PKCS#8 PEM {@link #savePrivateKey} writes; null when the file is missing, a GeneralSecurityException when it is present but unreadable as any supported key type. */
+	public static PrivateKey loadPrivateKey(Path path) throws Exception {
+		if (!Files.exists(path)) return null;
+		String pem = Files.readString(path, StandardCharsets.UTF_8);
+		String base64 = pem.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "").replaceAll("\s", "");
+		byte[] der = Base64.getMimeDecoder().decode(base64);
+		for (String algorithm : List.of("RSA", "EC", "Ed25519", "DSA")) {
+			try {
+				return KeyFactory.getInstance(algorithm).generatePrivate(new PKCS8EncodedKeySpec(der));
+			} catch (InvalidKeySpecException notThisKeyType) {
+			}
+		}
+		throw new GeneralSecurityException("Unsupported private key format in " + path);
+	}
+
+	/** Proves the key pairs with the certificate by signing a fresh random challenge and verifying it with the certificate's public key. */
+	public static void validateKeyMatchesCertificate(PrivateKey privateKey, X509Certificate certificate) throws GeneralSecurityException {
+		String algorithm = switch (privateKey.getAlgorithm()) {
+			case "RSA" -> "SHA256withRSA";
+			case "EC", "ECDSA" -> "SHA256withECDSA";
+			case "Ed25519" -> "Ed25519";
+			case "DSA" -> "SHA256withDSA";
+			default -> throw new GeneralSecurityException("Unsupported private key algorithm: " + privateKey.getAlgorithm());
+		};
+		byte[] challenge = new byte[64];
+		new SecureRandom().nextBytes(challenge);
+		Signature signature = Signature.getInstance(algorithm);
+		signature.initSign(privateKey);
+		signature.update(challenge);
+		Signature verification = Signature.getInstance(algorithm);
+		verification.initVerify(certificate.getPublicKey());
+		verification.update(challenge);
+		if (!verification.verify(signature.sign())) throw new GeneralSecurityException("The private key does not match the certificate " + certificate.getSubjectX500Principal());
 	}
 
 	private static String formatBase64(byte[] derEncodedBytes) {

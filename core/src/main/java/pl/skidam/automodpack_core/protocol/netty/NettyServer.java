@@ -1,15 +1,21 @@
 package pl.skidam.automodpack_core.protocol.netty;
 
 import static pl.skidam.automodpack_core.Constants.*;
+import static pl.skidam.automodpack_core.storage.StoragePaths.*;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.security.GeneralSecurityException;
 import java.security.KeyPair;
+import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.*;
@@ -22,64 +28,104 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslProvider;
+import io.netty.handler.timeout.IdleStateHandler;
+import io.netty.handler.traffic.GlobalTrafficShapingHandler;
 import io.netty.util.AttributeKey;
 
-import pl.skidam.automodpack_core.config.ConfigTools;
+import pl.skidam.automodpack_core.modpack.generation.GenerationHosting;
 import pl.skidam.automodpack_core.protocol.ModpackConnectionMode;
 import pl.skidam.automodpack_core.protocol.NetUtils;
 import pl.skidam.automodpack_core.protocol.ServerHolepunchBridge;
-import pl.skidam.automodpack_core.protocol.compression.CompressionType;
-import pl.skidam.automodpack_core.protocol.netty.handler.ProtocolServerHandler;
-import pl.skidam.automodpack_core.utils.AddressHelpers;
+import pl.skidam.automodpack_core.protocol.netty.handler.AmmhGateHandler;
+import pl.skidam.automodpack_core.protocol.netty.handler.HttpContractHandler;
+import pl.skidam.automodpack_core.protocol.netty.handler.ProxyProtocolHandler;
 import pl.skidam.automodpack_core.utils.CustomThreadFactoryBuilder;
-import pl.skidam.automodpack_core.utils.ObservableMap;
+import pl.skidam.automodpack_core.utils.FileLocks;
+import pl.skidam.automodpack_core.utils.HashUtils;
 
 public class NettyServer {
 
 	public static final AttributeKey<SocketAddress> REAL_REMOTE_ADDR = AttributeKey.valueOf("REAL_REMOTE_ADDR");
-	public static final AttributeKey<CompressionType> COMPRESSION_TYPE = AttributeKey.valueOf("COMPRESSION_TYPE");
-	public static final AttributeKey<Integer> CHUNK_SIZE = AttributeKey.valueOf("CHUNK_SIZE");
-	public static final AttributeKey<Byte> PROTOCOL_VERSION = AttributeKey.valueOf("PROTOCOL_VERSION");
-	private final Map<Channel, String> connections = new ConcurrentHashMap<>();
-	private final Map<String, Path> paths = new ConcurrentHashMap<>();
+	private volatile TrafficShaper trafficShaper;
+	private volatile Map<String, Path> paths = Map.of();
 	private MultithreadEventLoopGroup eventLoopGroup;
+	private ExecutorService diskReads;
 	private ChannelFuture serverChannel;
 	private volatile boolean sharedMagicEnabled;
+	private volatile boolean holepunchActive;
 	private String certificateFingerprint;
 	private SslContext sslCtx;
 
-	public void addConnection(Channel channel, String secret) {
-		synchronized (connections) {
-			connections.put(channel, secret);
-		}
+	public GlobalTrafficShapingHandler trafficHandler() {
+		TrafficShaper shaper = trafficShaper;
+		if (shaper == null) throw new IllegalStateException("Traffic shaper is not running");
+		return shaper.handler();
 	}
 
-	public void removeConnection(Channel channel) {
-		synchronized (connections) {
-			connections.remove(channel);
-		}
+	public void startSharedTraffic() {
+		closeTraffic();
+		trafficShaper = TrafficShaper.owned();
 	}
 
-	public Map<Channel, String> getConnections() {
-		return connections;
+	private void startEventLoopTraffic() {
+		closeTraffic();
+		trafficShaper = TrafficShaper.on(eventLoopGroup);
+	}
+
+	private void closeTraffic() {
+		if (trafficShaper != null) {
+			trafficShaper.close();
+			trafficShaper = null;
+		}
 	}
 
 	public String getCertificateFingerprint() {
 		return certificateFingerprint;
 	}
 
-	public void setPaths(ObservableMap<String, Path> paths) {
-		this.paths.putAll(paths.getMap());
-		paths.addOnPutCallback(this.paths::put);
-		paths.addOnRemoveCallback(this.paths::remove);
+	public void replacePaths(Map<String, Path> paths) {
+		replacePaths(new GenerationHosting(paths));
 	}
 
-	public void removePaths(ObservableMap<String, Path> paths) {
-		paths.getMap().forEach(this.paths::remove);
+	public void replacePaths(GenerationHosting hosting) {
+		this.paths = hosting.asMap();
+		documentEtags.replace(getPath(GenerationHosting.HEAD_DOCUMENT_KEY), getPath(GenerationHosting.JOURNAL_KEY));
 	}
 
-	public Optional<Path> getPath(String hash) {
-		return Optional.ofNullable(paths.get(hash));
+	// The etag memos live in DocumentEtags; the hosting swap is their invalidation point, and start() warms them too.
+	private final DocumentEtags documentEtags = new DocumentEtags();
+
+	/** The served document's sha1 for conditional fetches; null when it cannot be read, mirroring {@code HashUtils.getHash}. */
+	public String documentEtag(Path file) {
+		return documentEtags.etag(file);
+	}
+
+	public Optional<Path> getPath(String requestKey) {
+		if (requestKey == null) return Optional.empty();
+		if (requestKey.equals(GenerationHosting.HEAD_DOCUMENT_KEY) || requestKey.equals(GenerationHosting.JOURNAL_KEY))
+			return regularPath(paths.get(requestKey));
+		if (!HashUtils.isSha1(requestKey)) return Optional.empty();
+
+		return regularPath(paths.get(HashUtils.normalizeSha1(requestKey)));
+	}
+
+	private static Optional<Path> regularPath(Path path) {
+		return path != null && !Files.isSymbolicLink(path) && Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) ? Optional.of(path) : Optional.empty();
+	}
+
+	private final ActivityTracker activityTracker = new ActivityTracker();
+
+	public ActivityTracker activityTracker() {
+		return activityTracker;
+	}
+
+	// The activity command's read model resolves hashes against the hosting map and feeds the shaper's throughput.
+	private final ActivityView activityView = new ActivityView(activityTracker, this::getPath,
+			() -> trafficShaper == null ? -1 : trafficShaper.handler().trafficCounter().lastWriteThroughput());
+
+	/** The activity command's read model, with object hashes resolved against the current generation's pack paths. */
+	public ActivityTracker.Snapshot activitySnapshot() {
+		return activityView.snapshot();
 	}
 
 	public synchronized Optional<ChannelFuture> start() {
@@ -93,32 +139,40 @@ public class NettyServer {
 			return Optional.empty();
 		}
 
-		if (paths.isEmpty()) {
-			LOGGER.warn("No file to host. Can't start modpack hosting.");
+		if (getPath(GenerationHosting.HEAD_DOCUMENT_KEY).isEmpty()) {
+			LOGGER.warn("No current generation record is prepared. Can't start modpack hosting.");
 			return Optional.empty();
 		}
-
-		updateAdvertisedAddress();
+		// The first client after a restart must not pay the document hashes on the event loop either.
+		documentEtags.replace(getPath(GenerationHosting.HEAD_DOCUMENT_KEY), getPath(GenerationHosting.JOURNAL_KEY));
 
 		ModpackConnectionMode connectionMode = serverConfig.connectionMode;
-		if (connectionMode == ModpackConnectionMode.DIRECT && serverConfig.bindPort == -1) {
-			LOGGER.info("DIRECT is advertised without a built-in listener; expecting the endpoint to be handled externally");
-			return Optional.empty();
-		}
+		if (serverConfig.disableInternalTLS)
+			LOGGER.info("Internal TLS termination is disabled; the listener serves plaintext and expects TLS to be terminated in front of it");
 
 		try {
+			startReaders();
+
 			prepareTls();
 
 			if (connectionMode == ModpackConnectionMode.HOLEPUNCH) {
 				LOGGER.info("Hosting modpack through Minecraft Login holepunch; bindPort is not used");
-				ServerHolepunchBridge.register(this);
+				startSharedTraffic();
+				holepunchActive = ServerHolepunchBridge.register(this);
 				return Optional.empty();
 			}
 
-			if (connectionMode == ModpackConnectionMode.MAGIC_PACKET && serverConfig.bindPort == -1) {
+			if (connectionMode == ModpackConnectionMode.MAGIC && serverConfig.bindPort == -1) {
 				LOGGER.info("Hosting modpack through magic packet routing on the Minecraft port");
-				new TrafficShaper(null);
+				startSharedTraffic();
 				sharedMagicEnabled = true;
+				return Optional.empty();
+			}
+
+			if (serverConfig.bindPort == -1) {
+				LOGGER.info("{} is advertised without a built-in listener; expecting the endpoint to be served externally", connectionMode);
+				diskReads.shutdownNow();
+				diskReads = null;
 				return Optional.empty();
 			}
 
@@ -151,16 +205,38 @@ public class NettyServer {
 			eventLoopGroup = new NioEventLoopGroup(new CustomThreadFactoryBuilder().setNameFormat("AutoModpack Server IO #%d").setDaemon(true).build());
 		}
 
-		new TrafficShaper(eventLoopGroup);
+		startEventLoopTraffic();
 
 		serverChannel = new ServerBootstrap().channel(socketChannelClass).childOption(ChannelOption.TCP_NODELAY, true)
 				.childHandler(new ChannelInitializer<SocketChannel>() {
 					@Override
 					protected void initChannel(SocketChannel ch) {
-						ch.pipeline().addLast(MOD_ID, new ProtocolServerHandler(NettyServer.this, connectionMode, false));
+						// A PROXY header claims a source address that feeds secret validation, so only a listener whose
+						// operator opted in (a trusted proxy is in front) may consume one.
+						if (serverConfig.acceptProxyProtocol) ch.pipeline().addLast("proxy-protocol", new ProxyProtocolHandler());
+						// The contract listener is public, so fully silent connections are reaped: the all-idle bound sits
+						// far past any client's keep-alive reuse window, and a streamed body completes a write well
+						// inside it at the receipted drain floor, so the reap never interrupts a live transfer.
+						ch.pipeline().addLast(IdleStateHandler.class.getSimpleName(), new IdleStateHandler(0, 0, NetUtils.HTTP_IDLE_REAP_SECONDS));
+						ch.pipeline().addLast("traffic-shaper", NettyServer.this.trafficHandler());
+						if (connectionMode == ModpackConnectionMode.MAGIC) {
+							ch.pipeline().addLast(MOD_ID + "-magic-gate", new AmmhGateHandler(NettyServer.this, false));
+							return;
+						}
+						installContractHandlers(ch.pipeline());
 					}
 				}).group(eventLoopGroup).localAddress(bindAddress).bind().syncUninterruptibly();
 		return Optional.of(serverChannel);
+	}
+
+	/** TLS (when internal termination is on) and the URL contract, appended after whatever wire-side stack is present. */
+	public void installContractHandlers(ChannelPipeline pipeline) {
+		// Streaming responses queue whole chunks ahead of the peer's drain; the watermark bounds that queue and keeps compression overlapped with the wire.
+		// It sits here so every hosting shape - dedicated, shared magic, and holepunch - streams under the same receipts.
+		pipeline.channel().config().setWriteBufferWaterMark(new WriteBufferWaterMark(NetUtils.WRITE_BUFFER_LOW_WATER, NetUtils.WRITE_BUFFER_HIGH_WATER));
+		if (sslCtx != null) pipeline.addLast("tls", sslCtx.newHandler(pipeline.channel().alloc()));
+		else LOGGER.debug("TLS termination handled externally: {}", pipeline.channel().remoteAddress());
+		pipeline.addLast(MOD_ID, new HttpContractHandler(this, diskReads));
 	}
 
 	private void prepareTls() throws Exception {
@@ -172,38 +248,52 @@ public class NettyServer {
 			return;
 		}
 
-		if (!Files.exists(serverCertFile) || !Files.exists(serverPrivateKeyFile)) {
-			KeyPair keyPair = NetUtils.generateKeyPair();
-			X509Certificate cert = NetUtils.selfSign(keyPair);
-			NetUtils.saveCertificate(cert, serverCertFile);
-			NetUtils.savePrivateKey(keyPair.getPrivate(), serverPrivateKeyFile);
-		}
+		Path certFile = SERVER_CERT_FILE;
+		Path privateKeyFile = SERVER_PRIVATE_KEY_FILE;
+		ensureTlsMaterial(certFile, privateKeyFile);
 
-		X509Certificate cert = NetUtils.loadCertificate(serverCertFile);
+		X509Certificate cert = NetUtils.loadCertificate(certFile);
 		if (cert == null) throw new IllegalStateException("Server certificate couldn't be loaded");
 
-		sslCtx = SslContextBuilder.forServer(serverCertFile.toFile(), serverPrivateKeyFile.toFile()).sslProvider(SslProvider.JDK).protocols("TLSv1.3")
+		sslCtx = SslContextBuilder.forServer(certFile.toFile(), privateKeyFile.toFile()).sslProvider(SslProvider.JDK).protocols("TLSv1.3")
 				.ciphers(Arrays.asList("TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256")).sessionTimeout(1800).build();
 		certificateFingerprint = NetUtils.getFingerprint(cert);
 		if (certificateFingerprint != null) LOGGER.warn("Certificate fingerprint: {}", certificateFingerprint);
 	}
 
-	private void updateAdvertisedAddress() {
-		if (!serverConfig.updateIpsOnEveryStart) return;
-
-		String publicIp = AddressHelpers.getPublicIp();
-		if (publicIp != null) {
-			serverConfig.advertisedEndpointHost = publicIp;
-			LOGGER.warn("Setting Host IP to {}", serverConfig.advertisedEndpointHost);
-		} else {
-			LOGGER.error("Couldn't get public IP, please change it manually!");
-		}
-
-		try {
-			ConfigTools.writeAtomic(serverConfigFile, serverConfig);
-		} catch (Exception e) {
-			LOGGER.error("Failed to save updated advertised endpoint", e);
-		}
+	/**
+	 * The credentials folder may be shared by several server processes, so the pair is generated once under one lock and never regenerated over an existing pair - a new certificate would invalidate every client's pin.
+	 */
+	private void ensureTlsMaterial(Path certFile, Path privateKeyFile) throws IOException {
+		FileLocks.withLock(certFile.resolveSibling("tls.lock"), () -> {
+			boolean certExists = Files.exists(certFile);
+			boolean keyExists = Files.exists(privateKeyFile);
+			if (certExists != keyExists)
+				throw new IllegalStateException(
+						"The TLS material is inconsistent: exactly one of " + certFile + " and " + privateKeyFile + " exists; make the pair whole or remove both files manually");
+			if (!certExists) {
+				try {
+					KeyPair keyPair = NetUtils.generateKeyPair();
+					NetUtils.saveCertificate(NetUtils.selfSign(keyPair), certFile);
+					NetUtils.savePrivateKey(keyPair.getPrivate(), privateKeyFile);
+				} catch (IOException e) {
+					throw e;
+				} catch (Exception e) {
+					throw new IOException("Failed to generate the TLS pair", e);
+				}
+				return null;
+			}
+			try {
+				X509Certificate cert = NetUtils.loadCertificate(certFile);
+				PrivateKey key = NetUtils.loadPrivateKey(privateKeyFile);
+				if (cert == null || key == null) throw new GeneralSecurityException("the certificate or the private key is unreadable");
+				NetUtils.validateKeyMatchesCertificate(key, cert);
+			} catch (Exception e) {
+				throw new IllegalStateException(
+						"The TLS pair is corrupt (" + certFile + ", " + privateKeyFile + "); fix or remove both files manually - regenerating it would invalidate every client's certificate pin", e);
+			}
+			return null;
+		});
 	}
 
 	public boolean isSharedMagicEnabled() {
@@ -213,6 +303,7 @@ public class NettyServer {
 	public synchronized boolean stop() {
 		boolean stopped = true;
 		sharedMagicEnabled = false;
+		holepunchActive = false;
 		ServerHolepunchBridge.close();
 
 		try {
@@ -225,7 +316,7 @@ public class NettyServer {
 			serverChannel = null;
 		}
 
-		TrafficShaper.close();
+		closeTraffic();
 
 		try {
 			if (eventLoopGroup != null) eventLoopGroup.shutdownGracefully().sync();
@@ -237,16 +328,33 @@ public class NettyServer {
 			eventLoopGroup = null;
 		}
 
+		if (diskReads != null) diskReads.shutdownNow();
+		diskReads = null;
+
 		sslCtx = null;
 		certificateFingerprint = null;
 		return stopped;
 	}
 
 	public boolean isRunning() {
-		return sharedMagicEnabled || ServerHolepunchBridge.isRegistered() || serverChannel != null && serverChannel.channel().isOpen();
+		return sharedMagicEnabled || holepunchActive || serverChannel != null && serverChannel.channel().isOpen();
 	}
 
-	public SslContext getSslCtx() {
-		return sslCtx;
+	/** The pool body-streaming workers run on: one worker per in-flight response, each holding one FileChannel and one reusable chunk buffer off the event loop. */
+	public ExecutorService diskReads() {
+		return diskReads;
+	}
+
+	/** Starts the file-reader pool; every hosting shape streams bodies, so this must run before any listener or swap goes live. */
+	public void startReaders() {
+		// Reads are the only blocking work left in streaming: the event loop writes whenever the channel is writable,
+		// and each response keeps at most two 4 MiB chunks in flight. Four sequential readers saturate any disk, so the
+		// count is a constant that never grows with the client count - the old thread-per-response pool grew one parked
+		// thread per connection for a whole drain.
+		diskReads = Executors.newFixedThreadPool(4, r -> {
+			Thread t = new Thread(r, "automodpack-disk-reader");
+			t.setDaemon(true);
+			return t;
+		});
 	}
 }

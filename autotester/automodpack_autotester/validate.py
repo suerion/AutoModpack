@@ -1,22 +1,54 @@
-"""Static scenario validation — catch typos before a multi-minute Docker run."""
+"""Static scenario validation - catch typos before a multi-minute Docker run."""
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 
-from .config import scenario_matches_target
+from .config import expand_generated, scenario_matches_target
 from .engine import conditions
 from .engine.registry import get as get_verb
 from .engine.util import parse_duration
 
 _VALID_MODES = {"full", "client-only"}
 _VALID_NETWORKS = {"bridge", "host"}
+CONNECTION_MODES = {"MAGIC", "HOLEPUNCH", "HTTP"}
 _COND_FIELDS = ("when", "until", "that")
 _DURATION_FIELDS = ("timeout", "poll", "duration")
 _REGEX_FIELDS = ("matches", "matches_all", "matches_any", "not_matches")
 _COUNT_FIELDS = ("count", "min_count", "max_count")
 _REMOTE_MOD_FIELDS = {"url", "sha512", "name"}
 _SHA512 = re.compile(r"[0-9a-fA-F]{128}")
+# The verbs whose implementation actually reads skip_if; anywhere else the key is authoring drift.
+_SKIP_IF_VERBS = {"click", "screenshot", "wait_for"}
+_RELEASE_GATE_CAPABILITIES = frozenset({
+    "bootstrap",
+    "groups",
+    "patch-notes",
+    "multiplayer-settings",
+    "pack-switching",
+    "generation-update",
+    "conflict-preservation",
+    "instance-timeline",
+    "storage-maintenance",
+    "server-generation-rollback",
+    "server-object-gc",
+    "fresh-generation-deletion",
+    "removal",
+    "secure-bootstrap",
+    "offline-repair",
+    "repair-cas-integrity",
+    "first-install-cleanup-consent",
+    "repair-ui-navigation",
+    "storage-verification",
+})
+_RELEASE_GATE_REQUIRED_VERBS = {
+    "server-generation-rollback": "rollback_server_generation",
+    "server-object-gc": "collect_server_objects",
+    "offline-repair": "mutate_client_file",
+    "repair-cas-integrity": "mutate_active_object",
+    "storage-verification": "assert_client_object",
+}
 
 
 def validate_scenario(scenario: dict, macros: dict, targets: dict | None = None) -> list[str]:
@@ -24,6 +56,43 @@ def validate_scenario(scenario: dict, macros: dict, targets: dict | None = None)
 
     if not isinstance(scenario.get("id"), str) or not scenario["id"].strip():
         problems.append("scenario needs a non-empty string 'id'")
+    if scenario.get("id") == "all":
+        release_macros = dict(macros)
+        release_macros.update(scenario.get("sequences") or {})
+        declared = scenario.get("releaseGate", {}).get("covers", [])
+        if not isinstance(declared, list) or len(declared) != len(_RELEASE_GATE_CAPABILITIES) or set(declared) != _RELEASE_GATE_CAPABILITIES:
+            problems.append(f"release-gate scenario must declare exactly these capabilities: {sorted(_RELEASE_GATE_CAPABILITIES)}")
+        generations = (scenario.get("serverFiles", {}) or {}).get("generations")
+        if not isinstance(generations, list) or len(generations) < 2:
+            problems.append("release-gate scenario needs at least two serverFiles.generations entries")
+        for capability, required_verb in _RELEASE_GATE_REQUIRED_VERBS.items():
+            if not _contains_verb(scenario.get("flow", []), required_verb, release_macros):
+                problems.append(f"release-gate scenario must cover {capability} with verb {required_verb!r}")
+        path_modes = {str(path.get("mode", "")).upper() for path in scenario.get("connectionPaths", []) if isinstance(path, dict)}
+        if path_modes != CONNECTION_MODES:
+            problems.append(f"release-gate scenario must cover all connection modes: {sorted(CONNECTION_MODES)}")
+    generations = (scenario.get("serverFiles", {}) or {}).get("generations")
+    if generations is not None:
+        if not isinstance(generations, list):
+            problems.append("serverFiles.generations must be a list")
+        else:
+            for index, generation in enumerate(generations):
+                _check_generation_files(generation, problems, f"serverFiles.generations[{index}]")
+    for index, item in enumerate((scenario.get("serverFiles", {}) or {}).get("files", []) or []):
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not item["path"].strip():
+            problems.append(f"serverFiles.files[{index}]: expected a mapping with a non-empty path")
+        elif "sizeBytes" in item and (not isinstance(item["sizeBytes"], int) or isinstance(item["sizeBytes"], bool) or item["sizeBytes"] < 0):
+            problems.append(f"serverFiles.files[{index}].sizeBytes: expected a non-negative integer")
+    server_files_section = scenario.get("serverFiles", {}) or {}
+    try:
+        expanded = expand_generated(server_files_section.get("generated"))
+    except ValueError as problem:
+        problems.append(str(problem))
+    else:
+        literal_paths = {str(item.get("path")) for item in server_files_section.get("files", []) or [] if isinstance(item, dict)}
+        duplicated = sorted({str(file.path) for file in expanded} & literal_paths)
+        if duplicated:
+            problems.append(f"serverFiles.generated: declarations re-spell literal paths: {duplicated[:3]}")
 
     mode = str(scenario.get("mode", "full")).lower()
     if mode not in _VALID_MODES:
@@ -32,6 +101,8 @@ def validate_scenario(scenario: dict, macros: dict, targets: dict | None = None)
     net = scenario.get("network")
     if net is not None and str(net).lower() not in _VALID_NETWORKS:
         problems.append(f"unknown network {net!r} (expected one of {sorted(_VALID_NETWORKS)})")
+
+    _check_connection_paths(scenario.get("connectionPaths"), problems)
 
     for name, value in (scenario.get("timeouts") or {}).items():
         _check_duration(value, problems, f"timeouts.{name}")
@@ -60,6 +131,34 @@ def validate_scenario(scenario: dict, macros: dict, targets: dict | None = None)
 
     _walk(flow, known_macros, problems, stack=(), scoped_targets=scoped_targets)
     return problems
+
+
+def _check_connection_paths(paths, problems):
+    if paths is None:
+        return
+    if not isinstance(paths, list) or not paths:
+        problems.append("connectionPaths must be a non-empty list")
+        return
+    modes = set()
+    for index, path in enumerate(paths):
+        where = f"connectionPaths[{index}]"
+        if not isinstance(path, dict):
+            problems.append(f"{where}: expected a mapping")
+            continue
+        mode = str(path.get("mode", "")).upper()
+        if mode not in CONNECTION_MODES:
+            problems.append(f"{where}.mode: expected one of {sorted(CONNECTION_MODES)}, got {path.get('mode')!r}")
+        if mode in modes:
+            problems.append(f"{where}.mode: duplicate connection mode {mode!r}")
+        modes.add(mode)
+        for field in ("bindPort", "endpointPort"):
+            value = path.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < -1 or value > 65535 or value == 0:
+                problems.append(f"{where}.{field}: expected an integer port or -1, got {value!r}")
+        if not isinstance(path.get("deferFirstSyncToLogin", False), bool):
+            problems.append(f"{where}.deferFirstSyncToLogin: expected a boolean, got {path.get('deferFirstSyncToLogin')!r}")
+        if mode == "HTTP" and path.get("bindPort", -1) == -1 and not str(path.get("advertisedEndpointHost", "")).strip():
+            problems.append(f"{where}.bindPort: {mode} needs the dedicated listener or an advertisedEndpointHost served externally")
 
 
 def _target_pattern_matches(pattern: str, target_id: str) -> bool:
@@ -107,8 +206,79 @@ def _walk(steps, macros, problems, stack, scoped_targets):
             verb = step.get("do")
             if get_verb(verb) is None:
                 problems.append(f"unknown verb: {verb!r}")
+            if "skip_if" in step and verb not in _SKIP_IF_VERBS:
+                problems.append(f"{label}: skip_if is only supported on {sorted(_SKIP_IF_VERBS)}, not {verb!r} - the engine would silently ignore it")
             if verb == "stage_modpack":
                 _check_stage_modpack(step, problems, scoped_targets, label)
+            elif verb == "publish_server_generation":
+                _check_publish_generation(step, problems, label)
+            elif verb == "assert_generation":
+                _check_generation_assertion(step, problems, label)
+            elif verb in ("assert_file_content", "wait_file_content", "write_file", "mutate_client_file", "mutate_active_object", "assert_client_object", "mutate_timeline_object", "seed_unowned_local_file", "seed_same_path_conflict", "seed_mod_fixture", "assert_mod_fixture", "assert_timeline_file"):
+                if not isinstance(step.get("path"), str) or not step["path"].strip():
+                    problems.append(f"{label}.path: expected a non-empty relative path")
+                if verb in ("wait_file_content", "write_file") and not isinstance(step.get("content"), str):
+                    problems.append(f"{label}.content: expected a string")
+                if verb in ("seed_unowned_local_file", "seed_same_path_conflict", "seed_mod_fixture", "assert_mod_fixture", "assert_timeline_file", "mutate_timeline_object") and step.get("fixture") is not None:
+                    _check_mod_fixture(step.get("fixture"), problems, f"{label}.fixture")
+                if verb in ("seed_unowned_local_file", "seed_same_path_conflict", "seed_mod_fixture", "assert_mod_fixture") and step.get("fixture") is not None and isinstance(step.get("path"), str) and not step["path"].lower().endswith(".jar"):
+                    problems.append(f"{label}.path: valid mod fixtures must use a .jar path")
+                if verb == "seed_unowned_local_file" and step.get("fixture") is None and isinstance(step.get("path"), str) and step["path"].lower().endswith(".jar"):
+                    problems.append(f"{label}.fixture: .jar paths require a valid mod fixture mapping")
+                if verb == "seed_mod_fixture" and step.get("fixture") is None:
+                    problems.append(f"{label}.fixture: this verb requires a valid mod fixture mapping")
+                if verb in ("mutate_client_file", "mutate_active_object") and step.get("action") not in ("corrupt", "delete"):
+                    problems.append(f"{label}.action: expected 'corrupt' or 'delete'")
+                for field in ("present", "valid", "objectValid"):
+                    if field in step and not isinstance(step[field], bool):
+                        problems.append(f"{label}.{field}: expected a boolean")
+                if "count" in step and (not isinstance(step["count"], int) or isinstance(step["count"], bool) or step["count"] < 0):
+                    problems.append(f"{label}.count: expected a non-negative integer")
+
+
+def _contains_verb(steps, wanted, macros, stack=()):
+    if not isinstance(steps, list):
+        return False
+    for raw in steps:
+        if isinstance(raw, str):
+            if raw == wanted:
+                return True
+            if raw in macros and raw not in stack and _contains_verb(macros[raw], wanted, macros, (*stack, raw)):
+                return True
+        elif isinstance(raw, dict):
+            if raw.get("do") == wanted:
+                return True
+            name = raw.get("use")
+            if name == wanted:
+                return True
+            if name in macros and name not in stack and _contains_verb(macros[name], wanted, macros, (*stack, name)):
+                return True
+            if _contains_verb(raw.get("steps"), wanted, macros, stack):
+                return True
+    return False
+
+
+def _check_generation_files(generation, problems, where):
+    if not isinstance(generation, dict):
+        problems.append(f"{where}: expected a mapping")
+        return
+    files = generation.get("files", [])
+    if not isinstance(files, list):
+        problems.append(f"{where}.files: expected a list")
+        return
+    for index, item in enumerate(files):
+        location = f"{where}.files[{index}]"
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not item["path"].strip():
+            problems.append(f"{location}: expected a mapping with a non-empty path")
+            continue
+        path = Path(item["path"])
+        if path.is_absolute() or ".." in path.parts:
+            problems.append(f"{location}.path: path must stay inside the server modpack")
+        fixture = item.get("fixture")
+        if fixture is not None:
+            _check_mod_fixture(fixture, problems, f"{location}.fixture")
+            if not item["path"].lower().endswith(".jar"):
+                problems.append(f"{location}.path: valid mod fixtures must use a .jar path")
 
 
 def _check_duration(value, problems, where):
@@ -192,6 +362,58 @@ def _check_stage_modpack(step, problems, scoped_targets, where):
         name = entry.get("name")
         if name is not None and (not isinstance(name, str) or not name or "/" in name or "\\" in name):
             problems.append(f"{loc}.name: expected a plain filename")
+    if "recordOnly" in step and not isinstance(step["recordOnly"], bool):
+        problems.append(f"{where}.recordOnly: expected a boolean")
+    if "packId" in step and (not isinstance(step["packId"], str) or not step["packId"].strip()):
+        problems.append(f"{where}.packId: expected a non-empty string")
+    files = step.get("files", [])
+    if not isinstance(files, list):
+        problems.append(f"{where}.files: expected a list")
+    else:
+        for index, item in enumerate(files):
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not item["path"].strip():
+                problems.append(f"{where}.files[{index}]: expected a mapping with a non-empty path")
+            elif "fixture" in item:
+                _check_mod_fixture(item["fixture"], problems, f"{where}.files[{index}].fixture")
+                if not item["path"].lower().endswith(".jar"):
+                    problems.append(f"{where}.files[{index}].path: valid mod fixtures must use a .jar path")
+            if isinstance(item, dict) and "editable" in item and not isinstance(item["editable"], bool):
+                problems.append(f"{where}.files[{index}].editable: expected a boolean")
+
+
+def _check_mod_fixture(value, problems, where):
+    if not isinstance(value, dict):
+        problems.append(f"{where}: expected a mapping")
+        return
+    for field in ("modId", "version", "marker"):
+        if not isinstance(value.get(field), str) or not value[field].strip():
+            problems.append(f"{where}.{field}: expected a non-empty string")
+    depends = value.get("depends")
+    if depends is not None and (not isinstance(depends, list) or any(not isinstance(entry, str) or not entry.strip() for entry in depends)):
+        problems.append(f"{where}.depends: expected a list of non-empty mod-id strings")
+    nested = value.get("nested")
+    if nested is not None:
+        if not isinstance(nested, list):
+            problems.append(f"{where}.nested: expected a list of fixture mappings")
+        else:
+            for index, child in enumerate(nested):
+                _check_mod_fixture(child, problems, f"{where}.nested[{index}]")
+
+
+def _check_publish_generation(step, problems, where):
+    value = step.get("generation", 1)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        problems.append(f"{where}.generation: expected a positive integer")
+
+
+def _check_generation_assertion(step, problems, where):
+    groups = step.get("groups", {})
+    if not isinstance(groups, dict):
+        problems.append(f"{where}.groups: expected a mapping")
+        return
+    for group_id, requirements in groups.items():
+        if not isinstance(group_id, str) or not group_id.strip() or not isinstance(requirements, dict):
+            problems.append(f"{where}.groups: expected string IDs mapped to field mappings")
 
 
 def _check_per_target(value, scoped_targets, problems, where, validator):

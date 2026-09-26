@@ -6,27 +6,38 @@ import java.util.UUID;
 
 /*? if >= 1.21.9 {*/
 import net.minecraft.server.players.NameAndId;
-import net.minecraft.server.players.UserNameToIdResolver;
-/*?} else {*/
-/*import net.minecraft.server.players.GameProfileCache;
-*//*?}*/
+/*?}*/
+
+import net.minecraft.ChatFormatting;
+import net.minecraft.network.chat.ClickEvent;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.TextColor;
+import net.minecraft.server.level.ServerPlayer;
+
+import pl.skidam.automodpack.client.ui.versioned.VersionedText;
+import pl.skidam.automodpack_core.config.ServerConfigJsons;
+
+/*? if >=1.21.5 {*/
+import java.net.URI;
+/*?}*/
 
 import static pl.skidam.automodpack.init.Common.server;
+import static pl.skidam.automodpack_core.Constants.LOADER;
 
 public class GameHelpers {
 
-	// Simpler version of `PlayerManager.checkCanJoin`
-	public static boolean isPlayerAuthorized(SocketAddress address, GameProfile profile) {
+	// Simpler version of `PlayerManager.checkCanJoin`; always runs against the exact identity the login presented
+	public static boolean isPlayerAuthorized(SocketAddress address, UUID playerUuid, String playerName) {
 		if (server.isSameThread()) {
-			return checkPlayerAuthorizedInternal(address, profile);
+			return checkPlayerAuthorizedInternal(address, playerUuid, playerName);
 		}
 
-		return server.submit(() -> checkPlayerAuthorizedInternal(address, profile)).join();
+		return server.submit(() -> checkPlayerAuthorizedInternal(address, playerUuid, playerName)).join();
 	}
 
-	private static boolean checkPlayerAuthorizedInternal(SocketAddress address, GameProfile profile) {
+	private static boolean checkPlayerAuthorizedInternal(SocketAddress address, UUID playerUuid, String playerName) {
 		var playerManager = server.getPlayerList();
-		var playerId = /*? if >= 1.21.9 {*/new NameAndId(profile);/*?} else {*//*profile;*//*?}*/
+		var playerId = /*? if >= 1.21.9 {*/new NameAndId(playerUuid, playerName);/*?} else {*//*new GameProfile(playerUuid, playerName);*//*?}*/
 		if (playerManager.getBans().isBanned(playerId)) {
 			return false;
 		}
@@ -38,31 +49,6 @@ public class GameHelpers {
 		}
 
 		return true;
-	}
-
-	// Method to get GameProfile from UUID with accounting for a fact that this player may not be on the server right now
-	public static GameProfile getPlayerProfile(String id) {
-		UUID uuid = UUID.fromString(id);
-		String playerName = "Player"; // mock name, name matters less than UUID anyway
-		if (server.isSameThread()) {
-			return getProfile(uuid, playerName);
-		}
-
-		return server.submit(() -> getProfile(uuid, playerName)).join();
-	}
-
-	private static GameProfile getProfile(UUID uuid, String playerName) {
-		/*? if >= 1.21.9 {*/
-		NameAndId nameAndId = new NameAndId(uuid, playerName);
-		UserNameToIdResolver userCache = server.services().nameToIdCache();
-		nameAndId = userCache.get(uuid).orElse(nameAndId);
-		return new GameProfile(nameAndId.id(), nameAndId.name());
-		/*?} else {*/
-		/*GameProfile profile = new GameProfile(uuid, playerName);
-		GameProfileCache userCache = server.getProfileCache();
-		if (userCache != null) profile = userCache.get(uuid).orElse(profile);
-		return profile;
-		*//*?}*/
 	}
 
 	public static String getPlayerName(GameProfile profile) {
@@ -78,6 +64,24 @@ public class GameHelpers {
 		return profile.id();
 		/*?} else {*/
 		/*return profile.getId();
+		*//*?}*/
+	}
+
+	/** Sends the post-join chat nag: the bold nag message plus the clickable download row. */
+	public static void sendNag(ServerPlayer player, ServerConfigJsons.ServerConfigFieldsV3 config) {
+		Component nagText = VersionedText.literal(config.nagMessage).withStyle(style -> style.withBold(true));
+		Component nagClickableText = VersionedText.literal(config.nagClickableMessage).withStyle(style -> style.withUnderlined(true).withColor(TextColor.fromLegacyFormat(ChatFormatting.BLUE))
+				/*? if >=1.21.5 {*/
+				.withClickEvent(new ClickEvent.OpenUrl(URI.create(config.nagClickableLink))));
+				/*?} else {*/
+				/*.withClickEvent(new ClickEvent(ClickEvent.Action.OPEN_URL, config.nagClickableLink)));
+				*//*?}*/
+		/*? if >=26.1 {*/
+		player.sendSystemMessage(nagText, false);
+		player.sendSystemMessage(nagClickableText, false);
+		/*?} else {*/
+		/*player.displayClientMessage(nagText, false);
+		player.displayClientMessage(nagClickableText, false);
 		*//*?}*/
 	}
 }

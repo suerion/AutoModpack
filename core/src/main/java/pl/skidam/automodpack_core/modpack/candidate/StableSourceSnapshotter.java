@@ -1,0 +1,154 @@
+package pl.skidam.automodpack_core.modpack.candidate;
+
+import static pl.skidam.automodpack_core.Constants.LOGGER;
+import static pl.skidam.automodpack_core.Constants.MOD_ID;
+
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.Objects;
+
+import pl.skidam.automodpack_core.loader.FileInspection;
+import pl.skidam.automodpack_core.loader.LoaderManagerService;
+import pl.skidam.automodpack_core.loader.ModFileCache;
+import pl.skidam.automodpack_core.modpack.group.GroupManifest;
+import pl.skidam.automodpack_core.modpack.group.ModpackContentType;
+import pl.skidam.automodpack_core.modpack.group.ModpackPathPolicy;
+import pl.skidam.automodpack_core.storage.DataRootResolver;
+import pl.skidam.automodpack_core.utils.FileIntegrity;
+import pl.skidam.automodpack_core.utils.FileTrees;
+import pl.skidam.automodpack_core.utils.HashUtils;
+import pl.skidam.automodpack_core.utils.JarUtils;
+import pl.skidam.automodpack_core.utils.OsPaths;
+import pl.skidam.automodpack_core.utils.cache.FileCache;
+
+public final class StableSourceSnapshotter {
+	private final CopyOperation copyOperation;
+
+	public StableSourceSnapshotter() {
+		this(HashUtils::copyAndSha1);
+	}
+
+	StableSourceSnapshotter(CopyOperation copyOperation) {
+		this.copyOperation = Objects.requireNonNull(copyOperation);
+	}
+
+	public Snapshot snapshot(CandidateSource source, boolean autoExcludeServerMods, Path stagingDirectory,
+			FileCache fileCache, ModFileCache modFileCache, Path objectStoreDirectory, boolean materializeMissing) throws CandidateBuildException {
+		Path staged = null;
+		try {
+			FileCache.StatSnapshot before = FileCache.statSnapshot(source.sourcePath());
+			if (before.symbolicLink()) throw new IOException("Symbolic links are not allowed");
+			if (!before.regularFile()) throw new IOException("Source is not a regular file");
+			FileCache.FileFingerprint beforeFingerprint = before.fingerprint();
+			Exclusion exclusion = expectedPathExclusion(source);
+			if (exclusion != null) return new Snapshot(null, exclusion, null);
+
+			String sha1 = fileCache != null ? fileCache.getOrComputeHash(source.sourcePath()) : HashUtils.getHash(source.sourcePath());
+			if (sha1 == null) throw new IOException("SHA-1 calculation returned null");
+			if (!beforeFingerprint.equals(FileCache.fingerprint(source.sourcePath())))
+				throw new CandidateBuildException("Source changed while being snapshotted: " + source.sourcePath());
+
+			FileInspection.Mod mod = modFileCache == null ? null : modFileCache.getModOrNull(source.sourcePath(), fileCache);
+			if (isSelfFile(source.sourcePath(), mod)) return Snapshot.SKIPPED;
+			exclusion = expectedContentExclusion(source.sourcePath(), autoExcludeServerMods, mod);
+			if (exclusion != null) return new Snapshot(null, exclusion, null);
+			String type = fileType(source.sourcePath(), source.logicalPath(), mod);
+			String murmur = null;
+			if (ModpackContentType.isSourceFetchable(type)) murmur = fileCache != null ? fileCache.getOrComputeMurmur(source.sourcePath()) : HashUtils.getCurseforgeMurmurHash(source.sourcePath());
+			if (!beforeFingerprint.equals(FileCache.fingerprint(source.sourcePath())))
+				throw new CandidateBuildException("Source changed while being snapshotted: " + source.sourcePath());
+			GroupManifest.GroupFile file = new GroupManifest.GroupFile(before.size(), type, false, sha1, murmur);
+			if (!materializeMissing) return new Snapshot(file, null, null);
+			if (trustedObject(objectStoreDirectory, sha1, before.size(), fileCache)) return new Snapshot(file, null, null);
+
+			FileTrees.createManagedDirectory(stagingDirectory, "staging directory");
+			staged = Files.createTempFile(stagingDirectory, "snapshot-", stagingSuffix(source.sourcePath()));
+			String copiedSha1 = copyOperation.copy(source.sourcePath(), staged);
+			FileTrees.forceFile(staged);
+			if (!beforeFingerprint.equals(FileCache.fingerprint(source.sourcePath())))
+				throw new CandidateBuildException("Source changed while being snapshotted: " + source.sourcePath());
+			long size = Files.size(staged);
+			if (size != before.size()) throw new IOException("Staged snapshot size does not match stable source size: " + source.sourcePath());
+			if (copiedSha1 == null || !sha1.equalsIgnoreCase(copiedSha1)) throw new IOException("Staged snapshot SHA-1 does not match source identity: " + source.sourcePath());
+			return new Snapshot(file, null, new StagedObject(sha1, size, staged));
+		} catch (CandidateBuildException e) {
+			delete(staged, e);
+			throw e;
+		} catch (Exception e) {
+			CandidateBuildException failure = new CandidateBuildException("Failed to snapshot stable source " + source.sourcePath(), e);
+			delete(staged, failure);
+			throw failure;
+		}
+	}
+
+	private static boolean trustedObject(Path objectStoreDirectory, String sha1, long size, FileCache cache) {
+		if (objectStoreDirectory == null) return false;
+		Path object;
+		try {
+			object = DataRootResolver.objectFile(objectStoreDirectory, sha1);
+		} catch (IllegalArgumentException e) {
+			return false;
+		}
+		if (!FileIntegrity.matchesNamed(object, size, sha1, cache)) {
+			if (Files.isRegularFile(object, LinkOption.NOFOLLOW_LINKS)) LOGGER.warn("Immutable object {} no longer matches its Git-stat tripwire; restaging from source", object);
+			return false;
+		}
+		return true;
+	}
+
+	private static Exclusion expectedPathExclusion(CandidateSource source) {
+		String logicalPath = source.logicalPath();
+		// Correctness tier, always enforced and not expressible as admin rules: Windows clients cannot create these names,
+		// and the AutoModpack namespace belongs to the mod's own update flow.
+		if (logicalPath.equals("automodpack") || logicalPath.startsWith("automodpack/"))
+			return new Exclusion(ExcludedCandidate.Reason.INTERNAL_FILE, "AutoModpack internal content is never published");
+		for (Path component : Path.of(logicalPath))
+			if (OsPaths.isReservedWindowsDeviceName(component.toString())) return new Exclusion(ExcludedCandidate.Reason.RESERVED_WINDOWS_NAME, "'" + component + "' cannot be created on Windows clients");
+		return null;
+	}
+
+	/** The AutoModpack jar itself never becomes a candidate; clients receive it through the bootstrap flow, so it is not an exclusion event either. */
+	private static boolean isSelfFile(Path source, FileInspection.Mod cachedMod) {
+		String modId = cachedMod != null && cachedMod.id() != null ? cachedMod.id() : FileInspection.getModID(source);
+		return MOD_ID.equals(modId) || (MOD_ID + "_bootstrap").equals(modId) || (MOD_ID + "-bootstrap").equals(modId)
+				|| (MOD_ID + "_mod").equals(modId);
+	}
+
+	private static Exclusion expectedContentExclusion(Path source, boolean autoExcludeServerMods, FileInspection.Mod cachedMod) {
+		if (cachedMod == null && !FileInspection.isMod(source)) return null;
+		return autoExcludeServerMods && LoaderManagerService.EnvironmentType.SERVER.equals(FileInspection.getModEnvironment(source))
+				? new Exclusion(ExcludedCandidate.Reason.SERVER_SIDE_MOD, "detected as a server-side mod")
+				: null;
+	}
+
+	private static String fileType(Path source, String logicalPath, FileInspection.Mod cachedMod) {
+		if (cachedMod != null || FileInspection.isMod(source)) return ModpackContentType.MOD;
+		return ModpackPathPolicy.typeForPath(logicalPath);
+	}
+
+	private static String stagingSuffix(Path source) {
+		String name = source.getFileName().toString();
+		return JarUtils.hasJarExtension(name) ? ".jar" : ".staged";
+	}
+
+	private static void delete(Path path, CandidateBuildException failure) {
+		if (path == null) return;
+		try {
+			Files.deleteIfExists(path);
+		} catch (IOException e) {
+			failure.addSuppressed(e);
+		}
+	}
+
+	@FunctionalInterface
+	interface CopyOperation {
+		String copy(Path source, Path staged) throws IOException;
+	}
+
+	public record Snapshot(GroupManifest.GroupFile file, Exclusion exclusion, StagedObject object) {
+		/** The source is neither a candidate nor an exclusion event; it never reaches any report. */
+		public static final Snapshot SKIPPED = new Snapshot(null, null, null);
+	}
+
+	public record Exclusion(ExcludedCandidate.Reason reason, String message) {}
+}

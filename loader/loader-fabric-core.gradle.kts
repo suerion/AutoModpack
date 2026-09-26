@@ -1,122 +1,25 @@
-import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
-import org.gradle.api.file.DuplicatesStrategy
-
 plugins {
 	kotlin("jvm")
-	id("automodpack.utils")
-	id("com.gradleup.shadow")
-}
-
-base {
-	archivesName = property("mod.id") as String + "-" + project.name
-	version = property("mod_version") as String
-	group = property("mod.group") as String
+	id("automodpack.loader")
 }
 
 repositories {
 	mavenCentral()
 	maven { url = uri("https://maven.fabricmc.net/") }
-	flatDir {
-		name = "mcholepunchLibs"
-		dirs(rootProject.file("libs"))
-	}
 }
 
 val gsonVersion = versionProperty("versionLoaderGson")
 val log4jVersion = versionProperty("versionLoaderPlatformLog4j")
 val fabricLoaderVersion = loaderVersion()
-val tomljVersion = versionProperty("versionTomlj")
-val bouncyCastleVersion = versionProperty("versionBouncyCastle")
-val nettyVersion = versionProperty("versionNetty")
-val h2Version = versionProperty("versionH2")
-val mcholepunchVersion = versionProperty("versionMcholepunch")
-val aircompressorVersion = versionProperty("versionAircompressor")
 
 dependencies {
 	compileOnly(project(":core"))
-	compileOnly(project(":loader-core"))
-	compileOnly(project(":loader-fabric-15"))
-	compileOnly(project(":loader-fabric-16"))
+	compileOnly(project(":loader-knit-api-stubs"))
 
 	// External provided deps to compile this
 	compileOnly("com.google.code.gson:gson:$gsonVersion")
 	compileOnly("org.apache.logging.log4j:log4j-core:$log4jVersion")
 	compileOnly("net.fabricmc:fabric-loader:$fabricLoaderVersion")
-
-	// Stuff to actually bundle
-	implementation("io.airlift:aircompressor:$aircompressorVersion")
-	implementation("org.tomlj:tomlj:$tomljVersion")
-	implementation("org.bouncycastle:bcpkix-jdk18on:$bouncyCastleVersion")
-	// Disable transitives so netty-buffer/common/transport aren't pulled in
-	implementation("io.netty:netty-codec-haproxy:$nettyVersion") {
-		isTransitive = false
-	}
-	implementation("com.h2database:h2-mvstore:$h2Version")
-
-	// mcholepunch jars — shadowed into the loader so classes are available at
-	// the root classpath (needed by the preload-stage client).
-	implementation(":mcholepunch-core:$mcholepunchVersion")
-	implementation(":mcholepunch-server-netty:$mcholepunchVersion")
-}
-
-configurations {
-	create("shadowImplementation") {
-		extendsFrom(configurations.getByName("implementation"))
-		isCanBeResolved = true
-	}
-}
-
-tasks.named<ShadowJar>("shadowJar") {
-	dependsOn(tasks.named("processResources"))
-	archiveClassifier.set("")
-	duplicatesStrategy = DuplicatesStrategy.INCLUDE
-	filesNotMatching(listOf("META-INF/services/**", "META-INF/*.kotlin_module")) {
-		duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-	}
-
-	// Combine all subproject outputs efficiently
-	val subprojects = listOf(":core", ":loader-core", ":loader-fabric-core", ":loader-fabric-15", ":loader-fabric-16")
-	subprojects.forEach {
-		from(
-			project(it)
-				.sourceSets.main
-				.get()
-				.output,
-		)
-	}
-
-	configurations = listOf(project.configurations.getByName("shadowImplementation"))
-
-	val reloc = "amp_libs"
-	relocate("io.airlift.compress", "$reloc.io.airlift.compress")
-	relocate("org.antlr", "$reloc.org.antlr")
-	relocate("org.tomlj", "$reloc.org.tomlj")
-	relocate("org.checkerframework", "$reloc.org.checkerframework")
-	relocate("org.slf4j", "$reloc.org.slf4j")
-	relocate("org.bouncycastle", "$reloc.org.bouncycastle")
-	relocate("org.h2", "$reloc.org.h2")
-	relocate("io.netty.handler.codec.haproxy", "$reloc.io.netty.handler.codec.haproxy")
-
-	// Project internal relocations
-	relocate("pl.skidam.automodpack_loader_core_fabric", "pl.skidam.automodpack_loader_core")
-	relocate("pl.skidam.automodpack_loader_master_core_fabric", "pl.skidam.automodpack_loader_core")
-
-	// Cleanup
-	exclude("pl/skidam/automodpack_loader_core/loader/LoaderManager.class")
-	exclude("pl/skidam/automodpack_loader_core/mods/ModpackLoader.class")
-	exclude("pl/skidam/automodpack_loader_core_fabric/FabricLanguageAdapter.class")
-	exclude("pl/skidam/automodpack_loader_core_fabric/FabricLoaderImplAccessor.class")
-
-	exclude("kotlin/**", "log4j2.xml")
-	exclude("META-INF/maven/**", "META-INF/native-image/**", "META-INF/io.netty.versions.properties")
-	exclude("META-INF/*.kotlin_module", "META-INF/DEPENDENCIES*", "META-INF/LICENSE*", "META-INF/NOTICE*")
-	exclude("META-INF/versions/**/OSGI-INF/**")
-	exclude("META-INF/services/java.security.Provider")
-	exclude("org/bouncycastle/pqc/legacy/picnic/*.properties")
-	exclude("org/bouncycastle/pkix/CertPathReviewerMessages*.properties")
-	exclude("org/bouncycastle/x509/CertPathReviewerMessages*.properties")
-
-	mergeServiceFiles()
 }
 
 java {
@@ -124,16 +27,4 @@ java {
 	targetCompatibility = JavaVersion.VERSION_17
 	toolchain.languageVersion.set(JavaLanguageVersion.of(17))
 	withSourcesJar()
-}
-
-tasks.withType<JavaCompile> {
-	options.encoding = "UTF-8"
-}
-
-tasks.named<Jar>("jar") {
-	isEnabled = false
-}
-
-tasks.named("assemble") {
-	dependsOn("shadowJar")
 }

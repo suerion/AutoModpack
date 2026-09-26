@@ -1,5 +1,5 @@
 """Unit tests for the declarative engine: parsing, selectors, conditions,
-templating, polling, and the flow executor — all Docker-free."""
+templating, polling, and the flow executor - all Docker-free."""
 from __future__ import annotations
 
 import hashlib
@@ -111,13 +111,24 @@ def test_wait_for_passes_on_marker_in_final_logs_at_exit(make_ctx):
     wait_for(ctx, _log_step("READY", timeout="30s"))  # must not raise
 
 
+def test_wait_for_server_log_does_not_require_client(make_ctx):
+    """Server readiness can be checked before the bootstrap client is launched."""
+    from automodpack_autotester.engine.steps_ui import wait_for
+
+    ctx = make_ctx()
+    ctx.logs_provider = lambda which, tail=None: "Certificate fingerprint: AB:CD:EF" if which == "server" else ""
+    ctx.running_provider = lambda: (_ for _ in ()).throw(ClientExited("client not launched yet"))
+
+    wait_for(ctx, {"until": {"log": {"container": "server", "matches": "fingerprint"}}, "timeout": "30s"})
+
+
 # ── selectors ─────────────────────────────────────────────────────────────
 
 
 GUI = {
     "screenClass": "S",
     "buttons": [
-        {"id": 1, "text": "Cancel", "enabled": True, "class": "net.Btn"},
+        {"id": 1, "text": "Cancel", "key": "automodpack.cancel", "enabled": True, "class": "net.Btn"},
         {"id": 2, "text": "Download file", "enabled": False, "class": "net.Btn"},
         {"id": 3, "text": "Download", "enabled": True, "class": "net.Btn"},
     ],
@@ -135,6 +146,19 @@ def test_selector_enabled_filter():
     assert el is None  # the only "download file" button is disabled
 
 
+def test_selector_checked_filter():
+    gui = {
+        "buttons": [
+            {"id": 1, "text": "Keep 2 existing mod files", "enabled": True, "checked": False},
+            {"id": 2, "text": "Keep 2 existing mod files", "enabled": True, "checked": True},
+        ],
+        "textFields": [],
+    }
+    assert selectors.find_one(gui, {"text": "Keep 2 existing mod files", "checked": True})["id"] == 2
+    assert selectors.find_one(gui, {"text": "Keep 2 existing mod files", "checked": False})["id"] == 1
+    assert selectors.find_one(gui, {"text": "Keep 2 existing mod files"})["id"] == 1  # absent checked = no constraint
+
+
 def test_selector_role_and_class():
     assert selectors.find_one(GUI, {"role": "textfield"})["id"] == 9
     assert selectors.find_one(GUI, {"class": "edit"})["id"] == 9
@@ -148,6 +172,112 @@ def test_selector_index_negative():
 
 def test_selector_no_match():
     assert selectors.find_one(GUI, {"text": "nope"}) is None
+
+
+def test_selector_matches_translation_key():
+    gui = {
+        "buttons": [
+            {"id": 1, "text": "Go on", "key": "automodpack.firstConnect.continue", "enabled": True, "visible": True},
+            {"id": 2, "text": "Continue", "key": "automodpack.selection.preview", "enabled": True, "visible": True},
+        ],
+        "textFields": [],
+    }
+    assert selectors.find_one(gui, {"key": "automodpack.selection.preview"})["id"] == 2
+    assert selectors.find_one(gui, {"key_any": ["automodpack.cancel", "automodpack.selection.preview"]})["id"] == 2
+    assert selectors.find_one(gui, {"text": "continue"})["id"] == 2
+
+
+def test_selector_ignores_hidden_widgets_by_default():
+    gui = {
+        "buttons": [
+            {"id": 9, "text": "Continue", "enabled": True, "visible": False},
+            {"id": 3, "text": "Continue", "enabled": True, "visible": True},
+        ],
+        "textFields": [],
+    }
+    assert selectors.find_one(gui, {"text": "Continue"})["id"] == 3
+    assert selectors.find_one(gui, {"text": "Continue", "visible": False})["id"] == 9
+
+
+def test_click_timeout_reports_disabled_gui_state(make_ctx, monkeypatch):
+    from automodpack_autotester.engine import steps_ui
+
+    ctx = make_ctx()
+
+    class SnapshotBridge:
+        def gui(self, timeout=30):
+            return {
+                "screenClass": "TitleScreen",
+                "title": "Minecraft",
+                "buttons": [{"id": 8, "text": "multiplayer", "enabled": False, "visible": True}],
+            }
+
+        def click(self, element_id, **payload):
+            raise AssertionError("click must not be sent for a disabled element")
+
+    ctx.bridge = SnapshotBridge()
+    monkeypatch.setattr(steps_ui, "await_condition", lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("no element matched")))
+
+    with pytest.raises(TimeoutError, match=r"current screen: 'TitleScreen'.*multiplayer.*enabled.*False"):
+        steps_ui.click(ctx, {"select": {"text": "multiplayer"}})
+
+
+def test_click_skips_when_navigation_already_reached_its_destination(make_ctx):
+    from automodpack_autotester.engine import steps_ui
+
+    ctx = make_ctx()
+
+    class MultiplayerBridge:
+        def gui(self, timeout=30):
+            return {
+                "screenClass": "net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen",
+                "title": "Play Multiplayer",
+                "buttons": [{"id": 3, "text": "Direct Connection", "enabled": True, "visible": True}],
+            }
+
+        def click(self, element_id, **payload):
+            raise AssertionError("click must not be sent after navigation reached its destination")
+
+    ctx.bridge = MultiplayerBridge()
+    steps_ui.click(ctx, {"select": {"text": "multiplayer"}, "skip_if": {"screen": "Play Multiplayer"}, "timeout": "1ms"})
+
+
+def test_click_reselects_after_the_screen_changes_between_snapshot_and_interaction(make_ctx):
+    from automodpack_autotester.bridge import BridgeError
+    from automodpack_autotester.engine import steps_ui
+
+    ctx = make_ctx()
+
+    class ChangingBridge:
+        def __init__(self):
+            self.revision = 1
+            self.clicks = []
+
+        def gui(self, timeout=30):
+            return {"screenClass": "TitleScreen", "screenRevision": self.revision, "buttons": [{"id": self.revision, "text": "Multiplayer", "enabled": True, "visible": True}]}
+
+        def click(self, element_id, screen_revision=None, **payload):
+            self.clicks.append((element_id, screen_revision))
+            if len(self.clicks) == 1:
+                self.revision = 2
+                raise BridgeError("click", "stale_screen", "GUI screen changed before click")
+
+    ctx.bridge = ChangingBridge()
+    steps_ui.click(ctx, {"select": {"text": "multiplayer"}, "timeout": "1s"})
+
+    assert ctx.bridge.clicks == [(1, 1), (2, 2)]
+
+
+def test_element_lookup_honors_a_shared_interaction_deadline(make_ctx, monkeypatch):
+    from automodpack_autotester.engine import steps_ui
+
+    ctx = make_ctx()
+    observed = []
+    monkeypatch.setattr(steps_ui, "await_condition", lambda _candidate, timeout, _poll, _message: observed.append(timeout))
+
+    steps_ui._await_element(ctx, {"text": "missing"}, {"timeout": "30s"}, "missing", timeout=0.25)
+
+    assert observed == [0.25]
 
 
 # ── templating ────────────────────────────────────────────────────────────
@@ -185,6 +315,28 @@ def test_condition_screen_and_element(make_ctx):
     assert conditions.evaluate(ctx, {"no_element": {"text": "missing"}}, gui=GUI) is True
 
 
+def test_condition_vanilla_title_screen_uses_semantic_snapshot(make_ctx):
+    ctx = make_ctx()
+    condition = {
+        "all": [
+            {"screen": "Title Screen"},
+            {"element": {"role": "button", "text": "Singleplayer", "enabled": True, "visible": True}},
+            {"element": {"role": "button", "text": "Multiplayer", "enabled": True, "visible": True}},
+        ]
+    }
+    mapped_title = {
+        "screenClass": "net.minecraft.class_442",
+        "title": "Title Screen",
+        "buttons": [
+            {"id": 1, "text": "Singleplayer", "enabled": True, "visible": True},
+            {"id": 2, "text": "Multiplayer", "enabled": True, "visible": True},
+        ],
+    }
+    assert conditions.evaluate(ctx, condition, gui=mapped_title) is True
+    assert conditions.evaluate(ctx, condition, gui={**mapped_title, "title": "Play Multiplayer"}) is False
+    assert conditions.evaluate(ctx, condition, gui={**mapped_title, "buttons": mapped_title["buttons"][1:]}) is False
+
+
 def test_condition_screen_none(make_ctx):
     ctx = make_ctx()
     assert conditions.evaluate(ctx, {"screen_none": True}, gui={"screenClass": None}) is True
@@ -193,7 +345,7 @@ def test_condition_screen_none(make_ctx):
 
 def test_condition_file_and_gone(make_ctx):
     ctx = make_ctx()
-    (ctx.game_dir / "here.txt").write_text("x")
+    (ctx.game_dir / "here.txt").write_text("x", encoding="utf-8")
     assert conditions.evaluate(ctx, {"file": "here.txt"}) is True
     assert conditions.evaluate(ctx, {"file_gone": "nope.txt"}) is True
     assert conditions.evaluate(ctx, {"file": "nope.txt"}) is False
@@ -215,6 +367,33 @@ def test_condition_log_captures_variable(make_ctx):
     assert ctx.vars["fp"] == "AB:CD:EF"
 
 
+def test_screenshot_verb_records_artifact(make_ctx):
+    from automodpack_autotester.engine.steps_ui import screenshot
+    from .fake_bridge import FakeBridge
+
+    ctx = make_ctx()
+    ctx.bridge = FakeBridge(ctx)
+    screenshot(ctx, {"name": "capture prompt", "file": "first-connect"})
+
+    assert ctx.bridge.screenshots == ["first-connect"]
+    assert (ctx.game_dir / "automodpack/autotest/screenshots/first-connect.png").is_file()
+    assert ctx.vars["screenshot"].endswith("first-connect.png")
+
+
+def test_screenshot_verb_captures_the_currently_rendered_screen(make_ctx):
+    from automodpack_autotester.engine.steps_ui import screenshot
+    from .fake_bridge import FakeBridge
+
+    ctx = make_ctx()
+    ctx.bridge = FakeBridge(ctx)
+    ctx.bridge.screen = "settings"
+    assert ctx.bridge.rendered_screen == "title"
+
+    screenshot(ctx, {"file": "settings"})
+
+    assert ctx.bridge.rendered_screens["settings"] == "settings"
+
+
 # ── executor ──────────────────────────────────────────────────────────────
 
 
@@ -226,6 +405,12 @@ def _t_rec(ctx, step):
 @verb("t_boom")
 def _t_boom(ctx, step):
     raise RuntimeError("kaboom")
+
+
+@verb("t_flip")
+def _t_flip(ctx, step):
+    ctx.vars.setdefault("log", []).append(step.get("tag", "?"))
+    (ctx.game_dir / "flip.txt").touch()
 
 
 def test_executor_macro_and_group_expansion(make_ctx):
@@ -252,6 +437,18 @@ def test_executor_when_gate_and_repeat(make_ctx):
     }
     run_flow(ctx, scenario)
     assert ctx.vars["log"] == ["x", "x", "x"]
+
+
+def test_executor_when_stops_repeat_loop_once_condition_breaks(make_ctx):
+    ctx = make_ctx()
+    scenario = {
+        "flow": [
+            {"do": "t_flip", "tag": "loop", "when": {"not": {"file": "flip.txt"}}, "repeat": 5},
+            {"do": "t_rec", "tag": "done"},
+        ]
+    }
+    run_flow(ctx, scenario)
+    assert ctx.vars["log"] == ["loop", "done"]
 
 
 def test_executor_when_and_repeat_apply_to_macros_and_groups(make_ctx):
@@ -317,7 +514,7 @@ def test_log_whole_log_default_sees_early_lines(make_ctx):
         _LOGS.splitlines()[-tail:]
     )
     assert conditions.evaluate(ctx, {"log": {"matches": "Prelaunching AutoModpack"}}) is True
-    # A small explicit tail would scroll the early line out — proving the default matters.
+    # A small explicit tail would scroll the early line out - proving the default matters.
     assert conditions.evaluate(ctx, {"log": {"tail": 5, "matches": "Prelaunching AutoModpack"}}) is False
 
 
@@ -355,7 +552,7 @@ def test_log_file_target_reads_game_dir_artifact(make_ctx):
     ctx = make_ctx()
     debug = ctx.game_dir / "logs" / "debug.log"
     debug.parent.mkdir(parents=True, exist_ok=True)
-    debug.write_text("Mixin: Added class metadata for Workarounds$Reference\n")
+    debug.write_text("Mixin: Added class metadata for Workarounds$Reference\n", encoding="utf-8")
     cond = {"log": {"file": "logs/debug.log", "matches": r"Added class metadata for \S+Reference"}}
     assert conditions.evaluate(ctx, cond) is True
     # Missing file is empty, not an error.
@@ -494,3 +691,21 @@ def test_fetch_serializes_concurrent_downloads(tmp_path, monkeypatch):
     assert paths[0] == paths[1]
     assert paths[0].read_bytes() == payload
     assert calls == [("https://cdn/fixture.jar", 12)]
+
+
+def test_server_cache_volume_scopes_per_checkout():
+    from automodpack_autotester.config import checkout_tag, server_cache_volume
+
+    volume = server_cache_volume("26.2-fabric", "amp-server-cache")
+    assert volume == f"amp-server-cache-{checkout_tag()}-26.2-fabric"
+    # A different prefix or target must produce a different volume.
+    assert server_cache_volume("1.20.1-forge", "amp-server-cache") != volume
+    assert server_cache_volume("26.2-fabric", "other-prefix") != volume
+
+
+def test_checkout_tag_is_a_stable_short_hash_of_the_repo_root():
+    from automodpack_autotester.config import REPO_ROOT, checkout_tag
+
+    expected = hashlib.sha256(str(REPO_ROOT.resolve()).encode()).hexdigest()[:8]
+    assert checkout_tag() == expected
+    assert len(checkout_tag()) == 8

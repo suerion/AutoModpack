@@ -15,7 +15,6 @@ plugins {
 val fabric = the<FabricExtension>()
 val targetName = sc.current.project
 val minecraftVersion = property("deps.minecraft") as String
-val fabricApiVersion = property("deps.fabric-api") as String
 val fabricLoaderVersion = property("deps.fabric-loader") as String
 val mcholepunchVersion = versionProperty("versionMcholepunch")
 
@@ -36,20 +35,9 @@ repositories {
 
 dependencies {
 	implementation(project(":core")) { isTransitive = false }
-	implementation(project(":loader-core")) { isTransitive = false }
 
 	compileOnly(":mcholepunch-core:$mcholepunchVersion")
-	if (sc.current.parsed >= "1.20.1") {
-		// Fabric 1.20–1.21.x shares intermediary runtime names; Fabric 26.x uses Mojmap.
-		val adapterName =
-			if (sc.current.parsed >= "26.1") {
-				"mcholepunch-fabric-mojmap"
-			} else {
-				"mcholepunch-fabric-intermediary"
-			}
-		val adapter = modImplementation(":$adapterName:$mcholepunchVersion") { isTransitive = false }
-		include(adapter!!)
-	}
+	compileOnly(":mcholepunch-server-netty:$mcholepunchVersion")
 
 	minecraft("com.mojang:minecraft:$minecraftVersion")
 	if (!fabric.isUnobf) {
@@ -57,27 +45,6 @@ dependencies {
 	}
 
 	modImplementation("net.fabricmc:fabric-loader:$fabricLoaderVersion")
-
-	setOf(
-		"api-base", // Required by modules below
-		"registry-sync-v0", // Required for custom sounds
-		"networking-api-v1", // Required by registry sync module
-		"resource-loader-v0", // Required for translatable texts
-	).forEach {
-		include(modImplementation(fabricApi.module("fabric-$it", fabricApiVersion))!!)
-	}
-
-	// Required for commands
-	if (sc.current.parsed < "1.19.2") {
-		include(modImplementation(fabricApi.module("fabric-command-api-v1", fabricApiVersion))!!)
-	} else {
-		include(modImplementation(fabricApi.module("fabric-command-api-v2", fabricApiVersion))!!)
-	}
-
-	// Required for translatable texts in 1.21.9+ for some reason i need both v0 and v1?
-	if (sc.current.parsed >= "1.21.9") {
-		include(modImplementation(fabricApi.module("fabric-resource-loader-v1", fabricApiVersion))!!)
-	}
 }
 
 java {
@@ -106,12 +73,6 @@ tasks {
 		} else {
 			exclude("**/automodpack.unobf.accesswidener")
 		}
-
-		if (sc.current.parsed >= "1.21.9") {
-			exclude("**/pack.mcmeta")
-			rename("new-pack.mcmeta", "pack.mcmeta")
-		} else {
-			exclude("**/new-pack.mcmeta")
-		}
+		exclude("**/pack.mcmeta")
 	}
 }

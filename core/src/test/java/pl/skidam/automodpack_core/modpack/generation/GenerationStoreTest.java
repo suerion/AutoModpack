@@ -1,0 +1,328 @@
+package pl.skidam.automodpack_core.modpack.generation;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import com.google.gson.Gson;
+
+import pl.skidam.automodpack_core.config.ConfigTools;
+import pl.skidam.automodpack_core.config.GenerationJsons;
+import pl.skidam.automodpack_core.config.ModpackJsons;
+import pl.skidam.automodpack_core.modpack.candidate.ModpackCandidate;
+import pl.skidam.automodpack_core.modpack.candidate.StagedObject;
+import pl.skidam.automodpack_core.modpack.group.GroupManifest;
+import pl.skidam.automodpack_core.modpack.group.GroupManifestValidator;
+import pl.skidam.automodpack_core.storage.DataRootResolver;
+import pl.skidam.automodpack_core.utils.HashUtils;
+import pl.skidam.automodpack_core.utils.ImmutableFiles;
+
+class GenerationStoreTest {
+	@TempDir
+	Path tempDir;
+
+	@Test
+	void publishesRestoresAndCollectsHeadUnreachableObjects() throws Exception {
+		Path objects = tempDir.resolve("objects");
+		GenerationStore store = new GenerationStore(tempDir.resolve("state"), objects);
+		assertTrue(store.loadCurrent().isEmpty());
+
+		GenerationStore.Publication root = store.publish(candidate("one", "content-one"), "First", null);
+		GenerationStore.Current current = store.loadCurrent().orElseThrow();
+		assertEquals(root.entry().seq(), current.seq());
+		assertEquals("First", root.entry().notes());
+		assertEquals("one", current.manifest().toFields().categories.get("General").get("main").description);
+		assertEquals(1, current.seq());
+
+		GenerationStore.Publication second = store.publish(candidate("two", "content-two"), "Second", null);
+		assertEquals(2, second.entry().seq());
+		assertEquals(1, second.entry().summary().added() + second.entry().summary().changed());
+		assertTrue(second.entry().changes().stream().anyMatch(change -> change.path().equals("config/example.txt") && change.toSha1().equals(sha1("content-two"))));
+
+		// Restoring generation 1 brings back the old content and points at the restored entry.
+		GenerationStore.Publication restored = store.publishRestore(1, "Back to first");
+		assertEquals(3, restored.entry().seq());
+		assertEquals(root.entry().contentToken(), restored.entry().contentToken());
+		assertEquals(1, restored.entry().restoreOf());
+		assertTrue(restored.entry().changes().stream().anyMatch(change -> change.path().equals("config/example.txt")
+				&& sha1("content-two").equals(change.fromSha1()) && sha1("content-one").equals(change.toSha1())));
+		assertEquals(root.entry().contentToken(), store.loadCurrent().orElseThrow().contentToken());
+
+		// Only the head generation's content objects stay reachable; every other content object is collectable.
+		// Policy documents are never collected: the journal's metadata shadow keeps every generation foldable.
+		Files.createDirectories(objects.resolve("ff"));
+		Path orphan = objects.resolve("ff").resolve(sha1("orphan").substring(2));
+		Files.write(orphan, "orphan".getBytes(StandardCharsets.UTF_8));
+		GenerationStore.CollectionSummary collection = store.collectUnreachable();
+		assertEquals(2, collection.deletedObjects());
+		assertFalse(Files.exists(orphan));
+		assertFalse(Files.exists(DataRootResolver.objectFile(objects, sha1("content-two"))));
+		assertTrue(Files.exists(DataRootResolver.objectFile(objects, sha1("content-one"))));
+		assertTrue(Files.exists(DataRootResolver.objectFile(objects, second.entry().policySha1())));
+
+		// The head hosting map carries only the head document, the journal, the head policy, and the head tree.
+		TreeMap<String, Path> hosted = new TreeMap<>(store.hosting().asMap());
+		assertEquals(Set.of(GenerationHosting.HEAD_DOCUMENT_KEY, GenerationHosting.JOURNAL_KEY, sha1("content-one"), current.policySha1()), hosted.keySet());
+		for (Path hostedFile : hosted.values()) assertTrue(Files.isRegularFile(hostedFile));
+		assertEquals(3, Journal.open(tempDir.resolve("state").resolve("journal.jsonl")).length());
+	}
+
+	@Test
+	void collectThenRestoreFailsLoudlyAboutTheCollectedObjects() throws Exception {
+		Path objects = tempDir.resolve("objects");
+		GenerationStore store = new GenerationStore(tempDir.resolve("state"), objects);
+		store.publish(candidate("one", "content-one"), "First", null);
+		store.publish(candidate("two", "content-two"), "Second", null);
+		store.publishRestore(1, "Back to first");
+		store.publish(candidate("two", "content-two"), "Second again", null);
+		store.collectUnreachable();
+
+		IOException failure = assertThrows(IOException.class, () -> store.publishRestore(1, "No bytes left"));
+		assertTrue(failure.getMessage().contains("no longer stored"));
+	}
+
+	@Test
+	void journalReplayFromRootKeepsRemovedPathHistoryWithoutProjection() throws Exception {
+		Path objects = tempDir.resolve("objects");
+		Path state = tempDir.resolve("state");
+		GenerationStore store = new GenerationStore(state, objects);
+		store.publish(candidate(Map.of("config/a.txt", "A", "config/b.txt", "B")), "First", null);
+		store.publish(candidate(Map.of("config/a.txt", "A2")), "Second", null);
+		Files.delete(state.resolve("current-projection.json"));
+
+		// The projection is gone: the slow path replays the journal from the root and the folded
+		// ledger must still remember b.txt as a pack tombstone, not as a foreign file.
+		GenerationStore.Current current = new GenerationStore(state, objects).loadCurrent().orElseThrow();
+		OwnershipLedger.Entry removed = current.ledger().entries().get("config/b.txt");
+		assertNotNull(removed);
+		assertEquals(OwnershipLedger.Status.TOMBSTONE, removed.currentStatus());
+		assertTrue(removed.historicalHashes().stream().anyMatch(content -> content.size() == 1));
+	}
+
+	@Test
+	void contentTokenIgnoresPolicyOnlyChanges() throws Exception {
+		GenerationStore store = new GenerationStore(tempDir.resolve("state"), tempDir.resolve("objects"));
+		store.publish(candidate("one", "content-one"), "First", null);
+		String before = store.loadCurrent().orElseThrow().contentToken();
+
+		// Same bytes, different group policy: the content token must not move.
+		ModpackCandidate renamed = candidate("renamed", "content-one");
+		assertEquals(before, ContentTree.tokenOf(renamed.manifest()));
+	}
+
+	@Test
+	void waitingTrackPublishesThroughTheObjectStoreAndAChangedFileLandsAtTheNextPublish() throws Exception {
+		Path objects = tempDir.resolve("objects");
+		Path track = tempDir.resolve("waiting-music.ogg");
+		Files.write(track, "track-bytes".getBytes(StandardCharsets.UTF_8));
+		GenerationStore store = new GenerationStore(tempDir.resolve("state"), objects, track);
+		store.publish(candidate("one", "content-one"), "First");
+
+		Path object = DataRootResolver.objectFile(objects, sha1("track-bytes"));
+		assertEquals("track-bytes", Files.readString(object, StandardCharsets.UTF_8));
+		assertTrue(store.hosting().asMap().containsKey(sha1("track-bytes")));
+
+		// A corrupted store object is never a fact to cache: republishing the same track judges the
+		// object against its hash and replaces it instead of advertising bytes the server can never serve.
+		ImmutableFiles.unprotect(object);
+		Files.write(object, "truncated".getBytes(StandardCharsets.UTF_8));
+		store.publish(candidate("two", "content-two"), "Second");
+		assertEquals("track-bytes", Files.readString(object, StandardCharsets.UTF_8));
+
+		// A changed track file lands under its own hash at the next publish.
+		Files.write(track, "new-track-bytes".getBytes(StandardCharsets.UTF_8));
+		store.publish(candidate("three", "content-three"), "Third");
+		assertEquals("new-track-bytes", Files.readString(DataRootResolver.objectFile(objects, sha1("new-track-bytes")), StandardCharsets.UTF_8));
+		assertTrue(store.hosting().asMap().containsKey(sha1("new-track-bytes")));
+	}
+
+	@Test
+	void collectKeepsTheAdvertisedWaitingTrack() throws Exception {
+		Path objects = tempDir.resolve("objects");
+		Path track = tempDir.resolve("waiting-music.ogg");
+		Files.write(track, "track-bytes".getBytes(StandardCharsets.UTF_8));
+		GenerationStore store = new GenerationStore(tempDir.resolve("state"), objects, track);
+		store.publish(candidate("one", "content-one"), "First");
+		Files.createDirectories(objects.resolve("ff"));
+		Path orphan = objects.resolve("ff").resolve(sha1("orphan").substring(2));
+		Files.write(orphan, "orphan".getBytes(StandardCharsets.UTF_8));
+
+		store.collectUnreachable();
+
+		assertTrue(Files.exists(DataRootResolver.objectFile(objects, sha1("track-bytes"))));
+		assertFalse(Files.exists(orphan));
+	}
+
+	@Test
+	void policyOnlyRepublishLandsInTheJournalAndSurvivesAStoreReload() throws Exception {
+		Path state = tempDir.resolve("state");
+		Path objects = tempDir.resolve("objects");
+		GenerationStore store = new GenerationStore(state, objects);
+		store.publish(candidate("one", "content-one"), "First", null);
+		String beforeToken = store.loadCurrent().orElseThrow().contentToken();
+
+		// Same bytes, renamed group: the republish appends an empty-changes entry instead of reporting no changes,
+		// because the journal is the only truth a policy change can survive a reload through.
+		GenerationStore.Publication republished = store.publish(candidate("renamed", "content-one"), "Rename", null);
+		assertEquals(2, republished.entry().seq());
+		assertEquals(beforeToken, republished.entry().contentToken());
+		assertEquals(0, republished.entry().summary().added() + republished.entry().summary().changed() + republished.entry().summary().removed());
+
+		// The projection and the journal head agree: the reload folds the renamed policy, not a stale one.
+		GenerationStore reopened = new GenerationStore(state, objects);
+		GenerationStore.Current current = reopened.loadCurrent().orElseThrow();
+		assertEquals(2, current.seq());
+		assertEquals("renamed", current.manifest().toFields().categories.get("General").get("main").description);
+
+		// Republishing the very same policy again changes nothing at all: the head stays where it is.
+		GenerationStore.Publication unchanged = reopened.publish(candidate("renamed", "content-one"), "Nothing", null);
+		assertEquals(2, unchanged.entry().seq());
+	}
+
+	@Test
+	void journalReplayCorruptionIsArchivedAsideAndTheNextPublishStartsFresh() throws Exception {
+		Path state = tempDir.resolve("state");
+		Path objects = tempDir.resolve("objects");
+		String first = sha1("content-one");
+		String second = sha1("content-two");
+		GroupManifest manifestOne = manifest("one", "content-one");
+		GroupManifest manifestTwo = manifest("two", "content-two");
+		String policyOne = storePolicyObject(objects, manifestOne);
+		String policyTwo = storePolicyObject(objects, manifestTwo);
+		JournalEntry firstEntry = new JournalEntry(1, ContentTree.tokenOf(manifestOne), policyOne, TestPacks.CREATED, "First", JournalEntry.NO_RESTORE,
+				List.of(new JournalEntry.Change("config/example.txt", sha1("previous"), "previous".length(), first, "content-one".length())));
+		JournalEntry secondEntry = new JournalEntry(2, ContentTree.tokenOf(manifestTwo), policyTwo, TestPacks.CREATED, "Second", JournalEntry.NO_RESTORE,
+				List.of(new JournalEntry.Change("config/example.txt", first, "content-one".length(), second, "content-two".length())));
+		Files.createDirectories(state);
+		Files.writeString(state.resolve("journal.jsonl"),
+				new Gson().toJson(firstEntry.toFields()) + "\n" + new Gson().toJson(secondEntry.toFields()) + "\n", StandardCharsets.UTF_8);
+		Path journal = state.resolve("journal.jsonl");
+		Files.writeString(journal, Files.readString(journal, StandardCharsets.UTF_8).replace(second, sha1("tampered")), StandardCharsets.UTF_8);
+
+		// The replay no longer matches the recorded token: the store is archived aside and restarts empty instead of failing forever.
+		GenerationStore reopened = new GenerationStore(state, objects);
+		assertTrue(reopened.loadCurrent().isEmpty());
+		assertFalse(Files.exists(journal));
+		try (var leftovers = Files.list(state)) {
+			assertTrue(leftovers.anyMatch(path -> path.getFileName().toString().startsWith("journal.jsonl.corrupt-")));
+		}
+
+		GenerationStore.Publication fresh = reopened.publish(candidate("two", "content-two"), "After heal", null);
+		assertEquals(1, fresh.entry().seq());
+	}
+
+	@Test
+	void aStoreMissingItsPolicyDocumentsRestartsEmptyInsteadOfFailingForever() throws Exception {
+		Path state = tempDir.resolve("state");
+		Path objects = tempDir.resolve("objects");
+		GenerationStore store = new GenerationStore(state, objects);
+		GenerationStore.Publication root = store.publish(candidate("one", "content-one"), "First", null);
+
+		// No projection view and no policy object to rebuild it from: the state an interrupted publish can leave behind.
+		Files.delete(state.resolve("current-projection.json"));
+		Files.delete(DataRootResolver.objectFile(objects, root.entry().policySha1()));
+
+		GenerationStore reopened = new GenerationStore(state, objects);
+		assertTrue(reopened.loadCurrent().isEmpty());
+
+		GenerationStore.Publication fresh = reopened.publish(candidate("one", "content-one"), "After heal", null);
+		assertEquals(1, fresh.entry().seq());
+		assertEquals(root.entry().contentToken(), fresh.entry().contentToken());
+	}
+
+	@Test
+	void headDocumentCarriesIdentityPolicyAndLedger() throws Exception {
+		GenerationStore store = new GenerationStore(tempDir.resolve("state"), tempDir.resolve("objects"));
+		store.publish(candidate("one", "content-one"), "First", null);
+		store.publish(candidate("two", "content-two"), "Second", null);
+
+		Path projection = tempDir.resolve("state").resolve("current-projection.json");
+		GenerationJsons.HeadDocumentFields fields = ConfigToolsRead.read(projection);
+		assertEquals(2, fields.journalHead);
+		assertEquals(sha1("content-two"), fileEntry(fields).sha1);
+		assertEquals("abc1234", fields.policy.modpackId);
+		assertNotNull(fields.ownershipLedger.digest);
+	}
+
+	private static ModpackJsons.CompleteModpackContentFields.GroupFileFields fileEntry(GenerationJsons.HeadDocumentFields fields) {
+		return fields.policy.categories.get("General").get("main").files.get("config/example.txt");
+	}
+
+	private static GroupManifest manifest(String description, String content) {
+		ModpackJsons.CompleteModpackContentFields fields = new ModpackJsons.CompleteModpackContentFields();
+		fields.modpackId = "abc1234";
+		ModpackJsons.CompleteModpackContentFields.ModpackGroupFields group = new ModpackJsons.CompleteModpackContentFields.ModpackGroupFields();
+		group.description = description;
+		group.files = Map.of("config/example.txt", new ModpackJsons.CompleteModpackContentFields.GroupFileFields(String.valueOf(content.length()), "config", false, sha1(content), null));
+		fields.categories = Map.of("General", Map.of("main", group));
+		return GroupManifestValidator.validate(fields);
+	}
+
+	private static String storePolicyObject(Path objects, GroupManifest manifest) throws IOException {
+		byte[] bytes = ConfigTools.GSON.toJson(manifest.toFields()).getBytes(StandardCharsets.UTF_8);
+		String policySha1 = HashUtils.sha1(bytes);
+		Path object = DataRootResolver.objectFile(objects, policySha1);
+		Files.createDirectories(object.getParent());
+		Files.write(object, bytes);
+		return policySha1;
+	}
+
+	private ModpackCandidate candidate(Map<String, String> files) throws IOException {
+		Path staging = Files.createDirectories(tempDir.resolve("state").resolve("staging"));
+		Map<String, ModpackJsons.CompleteModpackContentFields.GroupFileFields> entries = new TreeMap<>();
+		TreeMap<String, StagedObject> staged = new TreeMap<>();
+		for (var entry : files.entrySet()) {
+			Path stagedPath = Files.createTempFile(staging, "candidate-", ".staged");
+			Files.writeString(stagedPath, entry.getValue(), StandardCharsets.UTF_8);
+			String hash = sha1(entry.getValue());
+			entries.put(entry.getKey(), new ModpackJsons.CompleteModpackContentFields.GroupFileFields(String.valueOf(entry.getValue().length()), "config", false, hash, null));
+			staged.put(hash, new StagedObject(hash, entry.getValue().length(), stagedPath));
+		}
+		ModpackJsons.CompleteModpackContentFields fields = new ModpackJsons.CompleteModpackContentFields();
+		fields.modpackId = "abc1234";
+		ModpackJsons.CompleteModpackContentFields.ModpackGroupFields group = new ModpackJsons.CompleteModpackContentFields.ModpackGroupFields();
+		group.description = "multi";
+		group.files = entries;
+		fields.categories = Map.of("General", Map.of("main", group));
+		return new ModpackCandidate(GroupManifestValidator.validate(fields), staged, new TreeMap<>(), List.of());
+	}
+
+	private ModpackCandidate candidate(String description, String content) throws IOException {
+		Path staging = Files.createDirectories(tempDir.resolve("state").resolve("staging"));
+		Path staged = Files.createTempFile(staging, "candidate-", ".staged");
+		Files.writeString(staged, content, StandardCharsets.UTF_8);
+		String hash = sha1(content);
+		ModpackJsons.CompleteModpackContentFields fields = new ModpackJsons.CompleteModpackContentFields();
+		fields.modpackId = "abc1234";
+		ModpackJsons.CompleteModpackContentFields.ModpackGroupFields group = new ModpackJsons.CompleteModpackContentFields.ModpackGroupFields();
+		group.description = description;
+		group.files = Map.of("config/example.txt", new ModpackJsons.CompleteModpackContentFields.GroupFileFields(String.valueOf(content.length()), "config", false, hash, null));
+		fields.categories = Map.of("General", Map.of("main", group));
+		GroupManifest manifest = GroupManifestValidator.validate(fields);
+		return new ModpackCandidate(manifest, new TreeMap<>(Map.of(hash, stagedObject(staged, hash, content.length()))), new TreeMap<>(), List.of());
+	}
+
+	private StagedObject stagedObject(Path staged, String hash, long size) throws IOException {
+		return new StagedObject(hash, size, staged);
+	}
+
+	private static String sha1(String content) {
+		return HashUtils.sha1(content.getBytes(StandardCharsets.UTF_8));
+	}
+
+	private static final class ConfigToolsRead {
+		static GenerationJsons.HeadDocumentFields read(Path path) throws IOException {
+			return ConfigTools.read(path, GenerationJsons.HeadDocumentFields.class).orElseThrow();
+		}
+	}
+}

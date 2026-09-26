@@ -1,5 +1,6 @@
 import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import org.gradle.api.file.DuplicatesStrategy
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 
 plugins {
 	kotlin("jvm")
@@ -24,11 +25,9 @@ val nettyVersion = versionProperty("versionNetty")
 val log4jVersion = versionProperty("versionLog4j")
 val gsonVersion = versionProperty("versionGson")
 val bouncyCastleVersion = versionProperty("versionBouncyCastle")
-val tomljVersion = versionProperty("versionTomlj")
-val antlrVersion = versionProperty("versionAntlr")
-val h2Version = versionProperty("versionH2")
 val junitVersion = versionProperty("versionJunit")
 val mcholepunchVersion = versionProperty("versionMcholepunch")
+val reconfVersion = versionProperty("versionReconf")
 val aircompressorVersion = versionProperty("versionAircompressor")
 
 val deps =
@@ -37,14 +36,12 @@ val deps =
 		"org.apache.logging.log4j:log4j-core:$log4jVersion",
 		"com.google.code.gson:gson:$gsonVersion",
 		"org.bouncycastle:bcpkix-jdk18on:$bouncyCastleVersion",
-		"org.tomlj:tomlj:$tomljVersion",
-		"org.antlr:antlr4-runtime:$antlrVersion",
-		"com.h2database:h2-mvstore:$h2Version",
 		"io.airlift:aircompressor:$aircompressorVersion",
 	)
 
 dependencies {
 	implementation(":mcholepunch-core:$mcholepunchVersion")
+	implementation(":reconf:$reconfVersion")
 	implementation(":mcholepunch-server-netty:$mcholepunchVersion")
 
 	// minecraft/loaders uses these, so we cant just implement them because it wont resolve in gradle
@@ -70,6 +67,17 @@ tasks.withType<JavaCompile> {
 
 tasks.named<Test>("test") {
 	useJUnitPlatform()
+	testLogging {
+		exceptionFormat = TestExceptionFormat.FULL
+	}
+	// ClientLeakTripwireTest scans the versioned targets' compiled classes. Ordering-only
+	// (mustRunAfter, not dependsOn): version projects implement :core, so depending on their
+	// tasks from here would form a project dependency cycle and break their compile classpath.
+	mustRunAfter(
+		rootProject.subprojects
+			.filter { rootProject.file("versions/${it.name}").isDirectory }
+			.map { it.tasks.named("compileJava") },
+	)
 }
 
 // Configure the ShadowJar task

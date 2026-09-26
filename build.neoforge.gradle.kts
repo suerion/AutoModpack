@@ -33,25 +33,14 @@ neoForge {
 
 dependencies {
 	implementation(project(":core")) { isTransitive = false }
-	implementation(project(":loader-core")) { isTransitive = false }
 
 	compileOnly(":mcholepunch-core:$mcholepunchVersion") { isTransitive = false }
-	if (sc.current.parsed >= "1.21.1") {
-		// NeoForge keeps Mojmap runtime names across these targets, so every release reuses the same
-		// Java 21 mixin shim while the client still selects the exact Minecraft wire protocol.
-		jarJar(implementation(":mcholepunch-neoforge:$mcholepunchVersion") { isTransitive = false })
-	}
+	compileOnly(":mcholepunch-server-netty:$mcholepunchVersion") { isTransitive = false }
 }
 
 tasks {
 	processResources {
-		exclude("**/fabric.mod.json", "**/automodpack*.accesswidener", "**/mods.toml")
-		if (sc.current.parsed >= "1.21.9") {
-			exclude("**/pack.mcmeta")
-			rename("new-pack.mcmeta", "pack.mcmeta")
-		} else {
-			exclude("**/new-pack.mcmeta")
-		}
+		exclude("**/fabric.mod.json", "**/automodpack*.accesswidener", "**/mods.toml", "**/pack.mcmeta")
 	}
 
 	named("createMinecraftArtifacts") {

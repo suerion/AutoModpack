@@ -1,0 +1,184 @@
+package pl.skidam.automodpack_core.update;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.List;
+import java.util.Set;
+
+import org.junit.jupiter.api.Test;
+
+import pl.skidam.automodpack_core.change.ChangeSet;
+import pl.skidam.automodpack_core.config.ClientConfigJsons;
+import pl.skidam.automodpack_core.modpack.generation.OwnershipLedger;
+import pl.skidam.automodpack_core.modpack.generation.PackTarget;
+import pl.skidam.automodpack_core.modpack.group.ClientPlatform;
+import pl.skidam.automodpack_core.update.UpdatePlan.NestedCopy;
+import pl.skidam.automodpack_core.update.UpdatePlan.Operation;
+import pl.skidam.automodpack_core.update.UpdatePlan.OperationType;
+import pl.skidam.automodpack_core.update.UpdatePlan.ProjectedFile;
+import pl.skidam.automodpack_core.update.UpdatePlan.Root;
+
+class ReviewedUpdatePlanTest {
+	private static final String OBJECT_HASH = "1111111111111111111111111111111111111111";
+	private static final String OTHER_HASH = "2222222222222222222222222222222222222222";
+
+	@Test
+	void reviewHasOneFiniteLifecycle() {
+		ReviewedUpdatePlan reviewed = ReviewedUpdatePlan.pending(plan(List.of(operation("mods/a.jar", OBJECT_HASH))));
+
+		assertEquals(ReviewedUpdatePlan.State.PENDING_REVIEW, reviewed.state());
+		assertFalse(reviewed.isApproved());
+
+		reviewed.approve();
+		reviewed.complete();
+
+		assertEquals(ReviewedUpdatePlan.State.APPLIED, reviewed.state());
+		assertThrows(IllegalStateException.class, reviewed::approve);
+		// Cancelling a finished plan is shutdown noise, not a bug: close() runs after every apply.
+		reviewed.cancel();
+		assertEquals(ReviewedUpdatePlan.State.APPLIED, reviewed.state());
+	}
+
+	@Test
+	void cancellationCannotBeReapprovedOrCompleted() {
+		ReviewedUpdatePlan reviewed = ReviewedUpdatePlan.pending(plan(List.of()));
+
+		reviewed.cancel();
+		reviewed.cancel();
+
+		assertEquals(ReviewedUpdatePlan.State.CANCELLED, reviewed.state());
+		assertThrows(IllegalStateException.class, reviewed::approve);
+		assertThrows(IllegalStateException.class, reviewed::complete);
+	}
+
+	@Test
+	void equivalentPlansHaveStableOrderIndependentFingerprint() {
+		UpdatePlan first = plan(List.of(operation("mods/a.jar", OBJECT_HASH), operation("config/a.json", OTHER_HASH)));
+		UpdatePlan reordered = plan(List.of(operation("config/a.json", OTHER_HASH), operation("mods/a.jar", OBJECT_HASH)));
+
+		ReviewedUpdatePlan.pending(first).requireCompatible(reordered);
+	}
+
+	@Test
+	void anAppliedPrefixOfTheSameOutcomeStaysCompatible() {
+		ChangeSet reviewedConsequences = ChangeSet.of(new ChangeSet.Change("mods/a.jar", ChangeSet.Kind.ADDED,
+				List.of(new ChangeSet.Occurrence("PROJECTION", "mods/a.jar", 1, null, null, OBJECT_HASH, "mod", List.of(), List.of()))));
+		UpdatePlan reviewed = plan(
+				List.of(operation("mods/a.jar", OBJECT_HASH), operation("config/a.json", OTHER_HASH)),
+				List.of(new ProjectedFile(Root.PROJECTION, "mods/a.jar", true, OBJECT_HASH, 1)),
+				reviewedConsequences);
+		// The first apply already ran the config operation, so the rebuilt plan carries less work for the same outcome.
+		UpdatePlan replanned = plan(
+				List.of(operation("mods/a.jar", OBJECT_HASH)),
+				List.of(new ProjectedFile(Root.PROJECTION, "mods/a.jar", true, OBJECT_HASH, 1)),
+				ChangeSet.empty());
+
+		ReviewedUpdatePlan.pending(reviewed).requireCompatible(replanned);
+	}
+
+	@Test
+	void alreadyAppliedDeletesAreNotAChangedOutcome() {
+		UpdatePlan reviewed = plan(List.of(operation("mods/keep.jar", OBJECT_HASH)),
+				List.of(new ProjectedFile(Root.PROJECTION, "mods/keep.jar", true, OBJECT_HASH, 1), new ProjectedFile(Root.PROJECTION, "mods/gone.jar", false, null, -1)));
+		UpdatePlan rebuilt = plan(List.of(), List.of(new ProjectedFile(Root.PROJECTION, "mods/keep.jar", true, OBJECT_HASH, 1)));
+
+		assertTrue(ReviewedUpdatePlan.outcomeCompatible(reviewed, rebuilt));
+		ReviewedUpdatePlan.pending(reviewed).requireCompatible(rebuilt);
+	}
+
+	@Test
+	void generatedCopiesArePartOfTheApprovedOutcome() {
+		NestedCopy first = new NestedCopy("mods/b.jar", OTHER_HASH, 2);
+		NestedCopy second = new NestedCopy("mods/a.jar", OBJECT_HASH, 1);
+		// Same path/sha1/size in a different order, with different transient ids, is still the same index.
+		UpdatePlan approved = plan(List.of(), List.of(), new ClientConfigJsons.ClientConfigFieldsV3(), ChangeSet.empty(), List.of(first, second));
+		UpdatePlan reordered = plan(List.of(), List.of(), new ClientConfigJsons.ClientConfigFieldsV3(), ChangeSet.empty(),
+				List.of(new NestedCopy("mods/a.jar", OBJECT_HASH, 1), first));
+		assertTrue(ReviewedUpdatePlan.outcomeCompatible(approved, reordered));
+		ReviewedUpdatePlan.pending(approved).requireCompatible(reordered);
+
+		UpdatePlan drifted = plan(List.of(), List.of(), new ClientConfigJsons.ClientConfigFieldsV3(), ChangeSet.empty(),
+				List.of(new NestedCopy("mods/c.jar", OBJECT_HASH, 1)));
+		IllegalStateException failure = assertThrows(IllegalStateException.class, () -> ReviewedUpdatePlan.pending(approved).requireCompatible(drifted));
+		assertTrue(failure.getMessage().contains("generated copies"));
+		assertFalse(ReviewedUpdatePlan.outcomeCompatible(approved, drifted));
+	}
+
+	@Test
+	void aDriftedProjectedFinalStateCannotBypassReview() {
+		ReviewedUpdatePlan reviewed = ReviewedUpdatePlan.pending(plan(
+				List.of(operation("mods/a.jar", OBJECT_HASH)),
+				List.of(new ProjectedFile(Root.PROJECTION, "mods/a.jar", true, OBJECT_HASH, 1))));
+		UpdatePlan drifted = plan(
+				List.of(operation("mods/a.jar", OBJECT_HASH)),
+				List.of(new ProjectedFile(Root.PROJECTION, "mods/a.jar", true, OTHER_HASH, 1)));
+
+		IllegalStateException failure = assertThrows(IllegalStateException.class, () -> reviewed.requireCompatible(drifted));
+		assertTrue(failure.getMessage().contains("projected final state"));
+	}
+
+	@Test
+	void aDriftedPlannedClientConfigCannotBypassReview() {
+		ClientConfigJsons.ClientConfigFieldsV3 config = new ClientConfigJsons.ClientConfigFieldsV3();
+		config.playMusic = false;
+
+		ReviewedUpdatePlan reviewed = ReviewedUpdatePlan.pending(plan(List.of(operation("mods/a.jar", OBJECT_HASH)), List.of(), new ClientConfigJsons.ClientConfigFieldsV3()));
+		UpdatePlan drifted = plan(List.of(operation("mods/a.jar", OBJECT_HASH)), List.of(), config);
+
+		IllegalStateException failure = assertThrows(IllegalStateException.class, () -> reviewed.requireCompatible(drifted));
+		assertTrue(failure.getMessage().contains("planned client configuration"));
+	}
+
+	@Test
+	void theTransactionJudgesRecoveryByItsCarriedOutcome() {
+		OwnershipLedger ledger = OwnershipLedger.empty("packaa1");
+		UpdatePlan plan = new UpdatePlan("packaa1", new PackTarget("packaa1", "a".repeat(40), "b".repeat(40), ledger.digest()), List.of(operation("mods/a.jar", OBJECT_HASH)),
+				List.of(new ProjectedFile(Root.PROJECTION, "mods/a.jar", true, OBJECT_HASH, 1)), new ClientConfigJsons.ClientConfigFieldsV3(),
+				Set.of(UpdatePlan.RestartReason.SELECTED_MODPACK), List.of(), List.of(), List.of(), List.of(), ChangeSet.empty());
+		UpdateTransaction transaction = UpdateTransaction.createRemoval(plan, ClientPlatform.LINUX, null, ledger.toFields(), "", new ClientConfigJsons.ClientConfigFieldsV3());
+
+		// Recovery replans after a partial apply, so shrunk work for the same outcome stays compatible...
+		UpdatePlan shrunk = new UpdatePlan("packaa1", new PackTarget("packaa1", "a".repeat(40), "b".repeat(40), ledger.digest()), List.of(operation("mods/a.jar", OTHER_HASH)),
+				List.of(new ProjectedFile(Root.PROJECTION, "mods/a.jar", true, OBJECT_HASH, 1)), new ClientConfigJsons.ClientConfigFieldsV3(),
+				Set.of(UpdatePlan.RestartReason.SELECTED_MODPACK), List.of(), List.of(), List.of(), List.of(), ChangeSet.empty());
+		assertTrue(ReviewedUpdatePlan.outcomeCompatible(transaction.plan(), shrunk));
+		// ...while a drifted outcome cannot slip through.
+		UpdatePlan drifted = new UpdatePlan("packaa1", new PackTarget("packaa1", "a".repeat(40), "b".repeat(40), ledger.digest()), List.of(operation("mods/a.jar", OBJECT_HASH)),
+				List.of(new ProjectedFile(Root.PROJECTION, "mods/a.jar", true, OTHER_HASH, 1)), new ClientConfigJsons.ClientConfigFieldsV3(),
+				Set.of(UpdatePlan.RestartReason.SELECTED_MODPACK), List.of(), List.of(), List.of(), List.of(), ChangeSet.empty());
+		assertFalse(ReviewedUpdatePlan.outcomeCompatible(transaction.plan(), drifted));
+	}
+
+	private static UpdatePlan plan(List<Operation> operations) {
+		return plan(operations, List.of(), new ClientConfigJsons.ClientConfigFieldsV3());
+	}
+
+	private static UpdatePlan plan(List<Operation> operations, List<ProjectedFile> projected) {
+		return plan(operations, projected, new ClientConfigJsons.ClientConfigFieldsV3());
+	}
+
+	private static UpdatePlan plan(List<Operation> operations, List<ProjectedFile> projected, ChangeSet consequences) {
+		return plan(operations, projected, new ClientConfigJsons.ClientConfigFieldsV3(), consequences);
+	}
+
+	private static UpdatePlan plan(List<Operation> operations, List<ProjectedFile> projected, ClientConfigJsons.ClientConfigFieldsV3 config) {
+		return plan(operations, projected, config, ChangeSet.empty());
+	}
+
+	private static UpdatePlan plan(List<Operation> operations, List<ProjectedFile> projected, ClientConfigJsons.ClientConfigFieldsV3 config, ChangeSet consequences) {
+		return plan(operations, projected, config, consequences, List.of());
+	}
+
+	private static UpdatePlan plan(List<Operation> operations, List<ProjectedFile> projected, ClientConfigJsons.ClientConfigFieldsV3 config, ChangeSet consequences,
+			List<NestedCopy> generatedCopies) {
+		return new UpdatePlan("packaa1", new PackTarget("packaa1", "a".repeat(40), "b".repeat(40), "c".repeat(40)), operations, projected,
+				config, Set.of(UpdatePlan.RestartReason.SELECTED_MODPACK), List.of(), List.of(), List.of(), generatedCopies, consequences);
+	}
+
+	private static Operation operation(String path, String objectHash) {
+		return new Operation(Root.PROJECTION, path, OperationType.INSTALL_OBJECT, objectHash, 1, null);
+	}
+}

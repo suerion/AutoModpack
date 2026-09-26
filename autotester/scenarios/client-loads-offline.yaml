@@ -1,12 +1,12 @@
 id: client-loads-offline
 description: |
   Offline / client-only smoke test. Pre-stage a modpack into the client game dir
-  and boot just the client — no server, no certificate/download/restart dance —
+  and boot just the client - no server, no certificate/download/restart dance -
   then assert on the launch log that AutoModpack prelaunched and loaded the staged
   modpack without a classloading failure. Tolerant of the client exiting afterward
   (e.g. a headless render crash), so it is robust on both headless and GPU hosts.
 
-  This is the fast loader-debugging path: edit code, rebuild, rerun, read logs —
+  This is the fast loader-debugging path: edit code, rebuild, rerun, read logs -
   seconds, not the minutes an end-to-end gameplay round trip takes.
 
 # No server is launched; the client loads a locally staged modpack.
@@ -31,7 +31,11 @@ flow:
           - 'Prelaunching AutoModpack'
           - 'AutoModpack prelaunched'
         not_matches:
-          - 'ClassNotFoundException'
+          # The Mixin subsystem probes the @Pseudo FabricLoginMixin target (a Fabric API class this
+          # modpack deliberately does not install) and logs the absent target as a benign WARN -
+          # Mixin then skips the pseudo mixin ("Skipping virtual target"), so that probe alone is
+          # not a classloading failure and must not fail the assert. Any other CNFE still does.
+          - '^(?!.*Error loading class: net/fabricmc/fabric/impl/networking/server/ServerLoginNetworkAddon).*ClassNotFoundException'
           - 'Failed to load modpack'
   - use: finish_client_only
 

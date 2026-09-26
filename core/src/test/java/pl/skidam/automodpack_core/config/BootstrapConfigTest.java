@@ -2,8 +2,11 @@ package pl.skidam.automodpack_core.config;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.util.Base64;
+
 import org.junit.jupiter.api.Test;
 
+import pl.skidam.automodpack_core.auth.Secrets;
 import pl.skidam.automodpack_core.protocol.ModpackConnectionMode;
 import pl.skidam.automodpack_core.utils.AddressHelpers;
 
@@ -12,16 +15,18 @@ class BootstrapConfigTest {
 
 	@Test
 	void installRequiresAndPreservesConnectionMode() {
-		Jsons.KnownHostsBootstrapFields fields = ConfigTools.parse("""
+		String secret = Secrets.generateSecret().secret();
+		ConnectionJsons.KnownHostsBootstrapFields fields = ConfigTools.parse("""
 				{
 				  "origin": "Play.Example.com",
 				  "fingerprint": "01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef",
 				  "modpackId": "abc1234",
 				  "endpoint": "Downloads.Example.com:25564",
 				  "connectionMode": "HOLEPUNCH",
-				  "reservedServerListName": "Future value"
+				  "secret": "%s",
+				  "serverName": "Cool Pack"
 				}
-				""", Jsons.KnownHostsBootstrapFields.class);
+				""".formatted(secret), ConnectionJsons.KnownHostsBootstrapFields.class);
 
 		BootstrapConfig.Validated validated = BootstrapConfig.validate(fields);
 		assertEquals("play.example.com:25565", AddressHelpers.formatAddress(validated.origin()));
@@ -29,11 +34,85 @@ class BootstrapConfigTest {
 		assertEquals(FINGERPRINT, validated.fingerprint());
 		assertEquals("abc1234", validated.modpackId());
 		assertEquals(ModpackConnectionMode.HOLEPUNCH, validated.connectionMode());
+		assertEquals(secret, validated.secret());
+		assertEquals("Cool Pack", validated.serverName());
+	}
+
+	@Test
+	void installWithoutSecretOrNameSkipsServerList() {
+		ConnectionJsons.KnownHostsBootstrapFields fields = new ConnectionJsons.KnownHostsBootstrapFields();
+		fields.origin = "play.example.com";
+		fields.fingerprint = FINGERPRINT;
+		fields.modpackId = "abc1234";
+		fields.endpoint = "downloads.example.com:25564";
+		fields.connectionMode = ModpackConnectionMode.HOLEPUNCH;
+
+		BootstrapConfig.Validated validated = BootstrapConfig.validate(fields);
+		assertNull(validated.secret());
+		assertNull(validated.serverName());
+		assertFalse(validated.hasSecret());
+		assertFalse(validated.hasServerName());
+	}
+
+	@Test
+	void httpBootstrapValidatesAndInstallsWithoutSecret() {
+		ConnectionJsons.KnownHostsBootstrapFields fields = ConfigTools.parse("""
+				{
+				  "origin": "Play.Example.com",
+				  "modpackId": "abc1234",
+				  "endpoint": "Downloads.Example.com:25564",
+				  "connectionMode": "HTTP"
+				}
+				""", ConnectionJsons.KnownHostsBootstrapFields.class);
+
+		BootstrapConfig.Validated validated = BootstrapConfig.validate(fields);
+		assertEquals("play.example.com:25565", AddressHelpers.formatAddress(validated.origin()));
+		assertEquals("downloads.example.com:25564", AddressHelpers.formatAddress(validated.endpoint()));
+		assertEquals("abc1234", validated.modpackId());
+		assertEquals(ModpackConnectionMode.HTTP, validated.connectionMode());
+		assertTrue(validated.installsModpack());
+		assertFalse(validated.hasSecret());
+		assertNull(validated.fingerprint());
+
+		ConnectionJsons.KnownHostsBootstrapFields installed = BootstrapConfig.install(validated.origin(), null, validated.modpackId(), validated.endpoint(), ModpackConnectionMode.HTTP, null);
+		assertEquals(ModpackConnectionMode.HTTP, installed.connectionMode);
+		assertNull(installed.secret);
+	}
+
+	@Test
+	void originAloneIsValidWithoutFingerprint() {
+		ConnectionJsons.KnownHostsBootstrapFields fields = new ConnectionJsons.KnownHostsBootstrapFields();
+		fields.origin = "play.example.com";
+		BootstrapConfig.Validated validated = BootstrapConfig.validate(fields);
+		assertNull(validated.fingerprint());
+		assertFalse(validated.installsModpack());
+		assertNull(validated.serverName());
+	}
+
+	@Test
+	void pinRejectsSecret() {
+		ConnectionJsons.KnownHostsBootstrapFields fields = new ConnectionJsons.KnownHostsBootstrapFields();
+		fields.origin = "play.example.com";
+		fields.fingerprint = FINGERPRINT;
+		fields.secret = Secrets.generateSecret().secret();
+		assertThrows(IllegalArgumentException.class, () -> BootstrapConfig.validate(fields));
+	}
+
+	@Test
+	void rejectsAnonymousSecret() {
+		ConnectionJsons.KnownHostsBootstrapFields fields = new ConnectionJsons.KnownHostsBootstrapFields();
+		fields.origin = "play.example.com";
+		fields.fingerprint = FINGERPRINT;
+		fields.modpackId = "abc1234";
+		fields.endpoint = "downloads.example.com:25564";
+		fields.connectionMode = ModpackConnectionMode.HOLEPUNCH;
+		fields.secret = Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[Secrets.BYTE_LENGTH]);
+		assertThrows(IllegalArgumentException.class, () -> BootstrapConfig.validate(fields));
 	}
 
 	@Test
 	void rejectsEndpointWithoutConnectionMode() {
-		Jsons.KnownHostsBootstrapFields fields = new Jsons.KnownHostsBootstrapFields();
+		ConnectionJsons.KnownHostsBootstrapFields fields = new ConnectionJsons.KnownHostsBootstrapFields();
 		fields.origin = "play.example.com";
 		fields.fingerprint = FINGERPRINT;
 		fields.modpackId = "abc1234";
@@ -44,7 +123,7 @@ class BootstrapConfigTest {
 
 	@Test
 	void rejectsMixedForms() {
-		Jsons.KnownHostsBootstrapFields mixed = new Jsons.KnownHostsBootstrapFields();
+		ConnectionJsons.KnownHostsBootstrapFields mixed = new ConnectionJsons.KnownHostsBootstrapFields();
 		mixed.origin = "play.example.com";
 		mixed.fingerprint = FINGERPRINT;
 		mixed.modpackId = "abc1234";

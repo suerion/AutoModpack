@@ -1,7 +1,6 @@
 """Execution context shared by every step: data, variables, templating, bridge access."""
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -12,9 +11,6 @@ from ..bridge import BridgeClient
 from .util import ClientExited
 
 _VAR = re.compile(r"\$\{([^}]+)\}")
-_MODPACK_ID = re.compile(r"[a-z0-9]{7}")
-
-
 @dataclass
 class Context:
     """Everything a step needs. Built once per test case by the runner."""
@@ -33,11 +29,31 @@ class Context:
     artifact: Path
     modpack_name: str
     marker_rel: Path
-    scenario_files: list  # list[(Path, str)]
-    expected_mods: list
+    scenario_files: list  # list[HostedFile]
+    # The barebones static HTTPS host container (static-host scenarios); removed
+    # with the case whether or not the flow ever started it.
+    static_name: str = ""
+    static_host_image: str = ""
+    # The S3-compatible host (MinIO) and its one-shot upload client (s3-host
+    # scenarios); removed with the case like the static host.
+    s3_name: str = ""
+    minio_image: str = ""
+    minio_client_image: str = ""
     # Address the client uses to reach the server. On bridge networking this is
     # the server container name; on host networking it's localhost.
     server_host: str | None = None
+    resource_scope: str = ""
+    # --netem tc netem argv tokens (empty when the knob is off), applied to the
+    # client container's eth0 after launch.
+    netem: list[str] = field(default_factory=list)
+    # --loss percentage (empty when the knob is off), applied as a netem loss qdisc to
+    # the SERVER container's eth0: the server's egress is the download's data direction,
+    # where segment loss actually stalls transfers.
+    loss: str = ''
+    # --server-netem tc netem argv tokens (empty when the knob is off), applied as one
+    # netem qdisc to the SERVER container's eth0 - delay/rate on the download's data
+    # direction. Shares the one root qdisc with --loss; the runner rejects combining them.
+    server_netem: list[str] = field(default_factory=list)
     vars: dict = field(default_factory=dict)
     bridge: BridgeClient | None = None
     # Injected by the runner so the engine stays decoupled from Docker.
@@ -47,44 +63,26 @@ class Context:
     # --- variables / templating -------------------------------------------
 
     def namespace(self) -> dict:
+        endpoint_port = self.vars.get("server_endpoint_port", 25565)
         return {
             "target": self.target,
-            "server": {"host": f"{self.server_host or self.srv_name}:25565"},
+            "server": {
+                "host": f"{self.server_host or self.srv_name}:25565",
+                "endpoint": f"{self.server_host or self.srv_name}:{endpoint_port}",
+            },
             "client": {"game_dir": str(self.game_dir)},
             "modpack": self.modpack_name,
-            "modpack_dir": self.selected_modpack_dir(),
+            "active_dir": self.active_projection_dir(),
             "marker": str(self.marker_rel),
             **self.vars,
         }
 
-    def selected_modpack_dir(self) -> str:
-        if modpack_dir := self.vars.get("modpack_dir"):
-            return str(modpack_dir)
-
-        config_file = self.game_dir / "automodpack" / "automodpack-client.json"
-        try:
-            config = json.loads(config_file.read_text())
-            selected = config.get("selectedModpackId")
-            if selected:
-                modpack_dir = f"automodpack/modpacks/{selected}"
-                self.vars["modpack_dir"] = modpack_dir
-                return modpack_dir
-        except (OSError, ValueError, TypeError):
-            pass
-
-        modpacks_dir = self.game_dir / "automodpack" / "modpacks"
-        try:
-            stable_dirs = []
-            for path in modpacks_dir.iterdir():
-                if path.is_dir() and _MODPACK_ID.fullmatch(path.name):
-                    stable_dirs.append(path.name)
-            if len(stable_dirs) == 1:
-                modpack_dir = f"automodpack/modpacks/{stable_dirs[0]}"
-                self.vars["modpack_dir"] = modpack_dir
-                return modpack_dir
-        except OSError:
-            pass
-        return f"automodpack/modpacks/{self.modpack_name}"
+    def active_projection_dir(self) -> str:
+        if active_dir := self.vars.get("active_dir"):
+            return str(active_dir)
+        active_dir = "automodpack/client/active"
+        self.vars["active_dir"] = active_dir
+        return active_dir
 
     def resolve(self, value: Any) -> Any:
         """Recursively expand ``${var}`` / ``${var.attr}`` in strings, lists, dicts."""

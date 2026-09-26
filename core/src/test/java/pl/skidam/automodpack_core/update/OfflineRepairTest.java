@@ -1,0 +1,393 @@
+package pl.skidam.automodpack_core.update;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.DosFileAttributeView;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import pl.skidam.automodpack_core.config.ClientStorageJsons;
+import pl.skidam.automodpack_core.config.ConfigTools;
+import pl.skidam.automodpack_core.config.ModpackJsons;
+import pl.skidam.automodpack_core.modpack.generation.JournalEntry;
+import pl.skidam.automodpack_core.modpack.generation.PackDocument;
+import pl.skidam.automodpack_core.modpack.generation.TestPacks;
+import pl.skidam.automodpack_core.modpack.group.ClientPlatform;
+import pl.skidam.automodpack_core.modpack.group.ClientSelectionStore;
+import pl.skidam.automodpack_core.modpack.group.GroupManifestValidator;
+import pl.skidam.automodpack_core.modpack.group.SelectedModpackTarget;
+import pl.skidam.automodpack_core.modpack.group.SelectionIntent;
+import pl.skidam.automodpack_core.storage.TestDataRoot;
+import pl.skidam.automodpack_core.utils.FileIntegrity;
+import pl.skidam.automodpack_core.utils.HashUtils;
+import pl.skidam.automodpack_core.utils.ImmutableFiles;
+
+class OfflineRepairTest {
+	@TempDir
+	Path temporaryDirectory;
+
+	@Test
+	void rebuildsCorruptCasFromVerifiedProjectionBeforeRepairingMaterialization() throws Exception {
+		ClientStorage storage = storage();
+		byte[] expectedBytes = "server-default".getBytes(StandardCharsets.UTF_8);
+		String hash = HashUtils.sha1(expectedBytes);
+		SelectedModpackTarget target = install(storage, new FileSpec("config/settings.json", "config", false, hash, expectedBytes.length));
+		write(storage.activePath("config/settings.json"), expectedBytes);
+		write(storage.objectFile(hash), "broken-object".getBytes(StandardCharsets.UTF_8));
+		write(storage.gamePath("config/settings.json"), "broken-live".getBytes(StandardCharsets.UTF_8));
+		OfflineRepair repair = new OfflineRepair(storage);
+
+		OfflineRepair.Prepared before = repair.inspect(new OfflineRepair.Request(target, Set.of(), null));
+		OfflineRepair.Receipt receipt = repair.apply(before);
+
+		assertEquals(2, before.findings().size());
+		assertEquals(1, receipt.repairedCasObjects());
+		assertEquals(1, receipt.repairedMaterializedFiles());
+		assertTrue(receipt.complete());
+		assertTrue(FileIntegrity.matches(storage.objectFile(hash), expectedBytes.length, hash));
+		assertTrue(FileIntegrity.matches(storage.gamePath("config/settings.json"), expectedBytes.length, hash));
+	}
+
+	@Test
+	void editableModCopiesAreNotOfferedForArchive() throws Exception {
+		ClientStorage storage = storage();
+		byte[] packBytes = "pack-mod".getBytes(StandardCharsets.UTF_8);
+		String hash = HashUtils.sha1(packBytes);
+		SelectedModpackTarget target = install(storage, new FileSpec("mods/edit.jar", "mod", true, hash, packBytes.length));
+		write(storage.activePath("mods/edit.jar"), packBytes);
+		byte[] edited = "player-mod".getBytes(StandardCharsets.UTF_8);
+		write(storage.gamePath("mods/edit.jar"), edited);
+		OfflineRepair repair = new OfflineRepair(storage);
+
+		OfflineRepair.Prepared before = repair.inspect(new OfflineRepair.Request(target, Set.of(), null));
+
+		// The live copy of an editable mod belongs to the pack until the player removes it; its divergence is a reset candidate, not unowned clutter.
+		assertTrue(before.unownedModPaths().isEmpty());
+		assertEquals(Set.of("mods/edit.jar"), before.editableResetCandidates().stream().map(OfflineRepair.EditableResetCandidate::logicalPath).collect(Collectors.toSet()));
+	}
+
+	@Test
+	void reportsUnavailableBytesWithoutChangingDamagedFiles() throws Exception {
+		ClientStorage storage = storage();
+		byte[] expectedBytes = "unavailable".getBytes(StandardCharsets.UTF_8);
+		String hash = HashUtils.sha1(expectedBytes);
+		SelectedModpackTarget target = install(storage, new FileSpec("config/settings.json", "config", false, hash, expectedBytes.length));
+		byte[] corrupt = "damaged".getBytes(StandardCharsets.UTF_8);
+		write(storage.objectFile(hash), corrupt);
+		OfflineRepair repair = new OfflineRepair(storage);
+
+		OfflineRepair.Prepared before = repair.inspect(new OfflineRepair.Request(target, Set.of(), null));
+		OfflineRepair.Receipt receipt = repair.apply(before);
+
+		assertTrue(before.requiresUpdate());
+		assertEquals(0, receipt.repairedCasObjects());
+		assertEquals(0, receipt.repairedMaterializedFiles());
+		assertFalse(receipt.complete());
+		assertEquals("damaged", Files.readString(storage.objectFile(hash), StandardCharsets.UTF_8));
+	}
+
+	@Test
+	void treatsEditableDifferenceAsResetCandidateWithoutResettingIt() throws Exception {
+		ClientStorage storage = storage();
+		byte[] expectedBytes = "server-default".getBytes(StandardCharsets.UTF_8);
+		String hash = HashUtils.sha1(expectedBytes);
+		SelectedModpackTarget target = install(storage, new FileSpec("config/settings.json", "config", true, hash, expectedBytes.length));
+		write(storage.objectFile(hash), expectedBytes);
+		write(storage.activePath("config/settings.json"), expectedBytes);
+		Path live = storage.gamePath("config/settings.json");
+		write(live, "my-local-edit".getBytes(StandardCharsets.UTF_8));
+		OfflineRepair repair = new OfflineRepair(storage);
+
+		OfflineRepair.Prepared prepared = repair.inspect(new OfflineRepair.Request(target, Set.of(), null));
+		OfflineRepair.Receipt receipt = repair.apply(prepared);
+
+		assertTrue(prepared.healthy());
+		assertEquals(Set.of("config/settings.json"), prepared.editableResetCandidates().stream().map(OfflineRepair.EditableResetCandidate::logicalPath).collect(Collectors.toSet()));
+		assertEquals("my-local-edit", Files.readString(live, StandardCharsets.UTF_8));
+		assertEquals(0, receipt.repairedMaterializedFiles());
+	}
+
+	@Test
+	void appliesOnlySelectedEditableResetsAndUnownedModArchival() throws Exception {
+		ClientStorage storage = storage();
+		byte[] expectedBytes = "server-default".getBytes(StandardCharsets.UTF_8);
+		String hash = HashUtils.sha1(expectedBytes);
+		SelectedModpackTarget target = install(storage, new FileSpec("config/settings.json", "config", true, hash, expectedBytes.length));
+		write(storage.objectFile(hash), expectedBytes);
+		write(storage.activePath("config/settings.json"), expectedBytes);
+		Path live = write(storage.gamePath("config/settings.json"), "my-local-edit".getBytes(StandardCharsets.UTF_8));
+		Path protectedJar = write(storage.modsDirectory().resolve("automodpack.jar"), "self".getBytes(StandardCharsets.UTF_8));
+		Path extra = write(storage.modsDirectory().resolve("extra.jar"), "extra".getBytes(StandardCharsets.UTF_8));
+		OfflineRepair repair = new OfflineRepair(storage);
+
+		OfflineRepair.Prepared prepared = repair.inspect(new OfflineRepair.Request(target, Set.of(), protectedJar));
+		OfflineRepair.Receipt receipt = repair.apply(prepared, Set.of("config/settings.json"), Set.of("mods/extra.jar"));
+
+		assertEquals(1, receipt.resetEditableFiles());
+		assertEquals(1, receipt.archivedUnownedMods());
+		assertTrue(FileIntegrity.matches(live, expectedBytes.length, hash));
+		assertFalse(Files.exists(extra));
+		assertTrue(Files.exists(protectedJar));
+		assertFalse(ClientStateJournal.open(storage).entries().isEmpty());
+		assertEquals(ClientStateJournal.Kind.REPAIR, ClientStateJournal.open(storage).head().kind());
+	}
+
+	@Test
+	void repairCheckpointCapturesReplacedBytesWhenATimelineExists() throws Exception {
+		ClientStorage storage = storage();
+		byte[] expectedBytes = "server-default".getBytes(StandardCharsets.UTF_8);
+		String hash = HashUtils.sha1(expectedBytes);
+		SelectedModpackTarget target = install(storage, new FileSpec("config/settings.json", "config", true, hash, expectedBytes.length));
+		write(storage.objectFile(hash), expectedBytes);
+		write(storage.activePath("config/settings.json"), expectedBytes);
+		byte[] editedBytes = "my-local-edit".getBytes(StandardCharsets.UTF_8);
+		write(storage.gamePath("config/settings.json"), editedBytes);
+		Path extra = write(storage.modsDirectory().resolve("extra.jar"), "extra".getBytes(StandardCharsets.UTF_8));
+		String extraHash = HashUtils.getHash(extra);
+		String editedHash = HashUtils.sha1(editedBytes);
+		ClientObjectStore.storeObject(storage, hash, expectedBytes);
+		ClientObjectStore.storeObject(storage, editedHash, editedBytes);
+		ClientObjectStore.storeObject(storage, extraHash, "extra".getBytes(StandardCharsets.UTF_8));
+		InstanceTree tree = InstanceTree.of(InstanceTree.LiveIdentity.empty(), List.of(
+				new InstanceTree.TrackedFile(UpdatePlan.Root.GAME_DIR, "", "config/settings.json", hash, expectedBytes.length)));
+		tree.write(storage);
+		ClientStateJournal.open(storage).append(tree.sha1(), ClientStateJournal.Kind.INSTALL, target.manifest().modpackId(), "txn-1");
+		OfflineRepair repair = new OfflineRepair(storage);
+
+		repair.apply(repair.inspect(new OfflineRepair.Request(target, Set.of(), null)), Set.of("config/settings.json"), Set.of("mods/extra.jar"));
+
+		assertEquals(ClientStateJournal.Kind.REPAIR, ClientStateJournal.open(storage).head().kind());
+		assertTrue(ClientObjectStore.referencedHashes(storage).contains(editedHash));
+		assertTrue(ClientObjectStore.referencedHashes(storage).contains(extraHash));
+	}
+
+	@Test
+	void resumesJournaledRepairAfterPowerLoss() throws Exception {
+		ClientStorage storage = storage();
+		byte[] expectedBytes = "server-default".getBytes(StandardCharsets.UTF_8);
+		String hash = HashUtils.sha1(expectedBytes);
+		SelectedModpackTarget target = install(storage, new FileSpec("config/settings.json", "config", true, hash, expectedBytes.length));
+		write(storage.objectFile(hash), expectedBytes);
+		write(storage.activePath("config/settings.json"), expectedBytes);
+		byte[] editedBytes = "my-local-edit".getBytes(StandardCharsets.UTF_8);
+		Path live = write(storage.gamePath("config/settings.json"), editedBytes);
+		Path extra = write(storage.modsDirectory().resolve("extra.jar"), "extra".getBytes(StandardCharsets.UTF_8));
+		OfflineRepair repair = new OfflineRepair(storage);
+		OfflineRepair.Request request = new OfflineRepair.Request(target, Set.of(), null);
+		OfflineRepair.Prepared prepared = repair.inspect(request);
+		OfflineRepair.EditableResetCandidate candidate = prepared.editableResetCandidates().get(0);
+		ClientStorageJsons.OfflineRepairJournalFields journal = new ClientStorageJsons.OfflineRepairJournalFields();
+		journal.modpackId = prepared.modpackId();
+		journal.contentToken = prepared.contentToken();
+		journal.selectionDigest = prepared.selectionDigest();
+		ClientStorageJsons.OfflineRepairJournalFields.EditableResetFields reset = new ClientStorageJsons.OfflineRepairJournalFields.EditableResetFields();
+		reset.logicalPath = candidate.logicalPath();
+		reset.defaultHash = candidate.defaultHash();
+		reset.defaultSize = candidate.defaultSize();
+		reset.currentHash = candidate.currentHash();
+		reset.currentSize = candidate.currentSize();
+		reset.absent = candidate.absent();
+		journal.editableResets = List.of(reset);
+		ClientStorageJsons.OfflineRepairJournalFields.UnownedModFields unowned = new ClientStorageJsons.OfflineRepairJournalFields.UnownedModFields();
+		unowned.logicalPath = "mods/extra.jar";
+		unowned.objectHash = HashUtils.getHash(extra);
+		unowned.size = Files.size(extra);
+		journal.unownedMods = List.of(unowned);
+		ConfigTools.writeAtomic(storage.repairJournalFile(), journal);
+
+		OfflineRepair.Receipt receipt = repair.recover(request).orElseThrow();
+
+		assertTrue(FileIntegrity.matches(live, expectedBytes.length, hash));
+		assertFalse(Files.exists(extra));
+		assertFalse(Files.exists(storage.repairJournalFile()));
+		assertEquals(1, receipt.resetEditableFiles());
+		assertEquals(1, receipt.archivedUnownedMods());
+	}
+
+	@Test
+	void reportsUnownedModsButProtectsOnlyTheExactLoadedJar() throws Exception {
+		ClientStorage storage = storage();
+		byte[] expectedBytes = "server-mod".getBytes(StandardCharsets.UTF_8);
+		String hash = HashUtils.sha1(expectedBytes);
+		SelectedModpackTarget target = install(storage, new FileSpec("mods/server.jar", "mod", false, hash, expectedBytes.length));
+		write(storage.objectFile(hash), expectedBytes);
+		write(storage.activePath("mods/server.jar"), expectedBytes);
+		Path protectedJar = write(storage.modsDirectory().resolve("automodpack.jar"), "self".getBytes(StandardCharsets.UTF_8));
+		write(storage.modsDirectory().resolve("extra.jar"), "extra".getBytes(StandardCharsets.UTF_8));
+		OfflineRepair repair = new OfflineRepair(storage);
+		long fileCacheBefore = regularFileCount(storage.fileCacheDirectory());
+		long modCacheBefore = regularFileCount(storage.modCacheDirectory());
+
+		OfflineRepair.Prepared prepared = repair.inspect(new OfflineRepair.Request(target, Set.of(), protectedJar));
+
+		assertEquals(List.of("mods/extra.jar"), prepared.unownedModPaths());
+		assertTrue(prepared.healthy());
+		assertEquals(fileCacheBefore, regularFileCount(storage.fileCacheDirectory()));
+		assertEquals(modCacheBefore, regularFileCount(storage.modCacheDirectory()));
+	}
+
+	@Test
+	void repairsTheActiveDetachedGenerationByteExactWhileSyncStaysGated() throws Exception {
+		ClientStorage storage = storage();
+		byte[] expectedBytes = "detached-generation".getBytes(StandardCharsets.UTF_8);
+		String hash = HashUtils.sha1(expectedBytes);
+		SelectedModpackTarget target = install(storage, new FileSpec("config/settings.json", "config", false, hash, expectedBytes.length));
+		storage.setDetached(target.manifest().modpackId(), true);
+		write(storage.objectFile(hash), expectedBytes);
+		write(storage.activePath("config/settings.json"), expectedBytes);
+		write(storage.gamePath("config/settings.json"), "damaged-live".getBytes(StandardCharsets.UTF_8));
+		List<JournalEntry> journalBefore = new JournalMirror(storage).entries(target.manifest().modpackId());
+		// The repair request is built the way ClientOfflineRepair builds it: the mirror + CAS + active-state reconstruction.
+		SelectedModpackTarget active = new ClientGenerationStore(storage).readActiveTarget(ClientPlatform.current()).orElseThrow();
+		OfflineRepair repair = new OfflineRepair(storage);
+
+		OfflineRepair.Prepared prepared = repair.inspect(new OfflineRepair.Request(active, Set.of(), null));
+		OfflineRepair.Receipt receipt = repair.apply(prepared);
+
+		assertEquals(target.document().contentToken(), prepared.contentToken(), "the repair target is the active detached generation");
+		assertTrue(receipt.complete());
+		assertTrue(FileIntegrity.matches(storage.gamePath("config/settings.json"), expectedBytes.length, hash));
+		assertTrue(FileIntegrity.matches(storage.activePath("config/settings.json"), expectedBytes.length, hash));
+		assertTrue(storage.isDetached(target.manifest().modpackId()), "repair keeps the pack detached");
+		assertEquals(target.document().contentToken(), storage.readActiveState().contentToken);
+		assertEquals(journalBefore, new JournalMirror(storage).entries(target.manifest().modpackId()), "repair never rewrites the mirror");
+	}
+
+	@Test
+	void leavesOnlyUnavailableFindingsAfterApplyingEveryLocalRepair() throws Exception {
+		ClientStorage storage = storage();
+		byte[] alpha = "amp-autotest-alpha-v2\n".getBytes(StandardCharsets.UTF_8);
+		byte[] beta = "{\"id\":\"beta\",\"value\":43}".getBytes(StandardCharsets.UTF_8);
+		byte[] delta = "delta-v2\n".getBytes(StandardCharsets.UTF_8);
+		byte[] shared = "pack-a-default\n".getBytes(StandardCharsets.UTF_8);
+		byte[] edited = "pack-a-local\n".getBytes(StandardCharsets.UTF_8);
+		String alphaHash = HashUtils.sha1(alpha);
+		String betaHash = HashUtils.sha1(beta);
+		String deltaHash = HashUtils.sha1(delta);
+		SelectedModpackTarget target = install(storage,
+				new FileSpec("config/alpha.txt", "config", false, alphaHash, alpha.length),
+				new FileSpec("config/beta.json", "config", false, betaHash, beta.length),
+				new FileSpec("config/delta.txt", "config", false, deltaHash, delta.length),
+				new FileSpec("config/shared.txt", "config", true, HashUtils.sha1(shared), shared.length));
+		String modpackId = target.manifest().modpackId();
+		for (byte[] content : List.of(alpha, beta, delta, shared)) {
+			String hash = HashUtils.sha1(content);
+			write(storage.objectFile(hash), content);
+		}
+		link(storage.objectFile(alphaHash), storage.activePath("config/alpha.txt"));
+		link(storage.objectFile(betaHash), storage.activePath("config/beta.json"));
+		link(storage.objectFile(deltaHash), storage.activePath("config/delta.txt"));
+		link(storage.objectFile(HashUtils.sha1(shared)), storage.activePath("config/shared.txt"));
+		write(storage.gamePath("config/alpha.txt"), alpha);
+		write(storage.gamePath("config/beta.json"), beta);
+		write(storage.gamePath("config/delta.txt"), delta);
+		write(storage.gamePath("config/shared.txt"), shared);
+		Path unowned = write(storage.modsDirectory().resolve("local-unowned.jar"), "unowned".getBytes(StandardCharsets.UTF_8));
+		StateHistory.snapshotIfDirty(storage, Set.of(), ClientStateJournal.Kind.INSTALL, modpackId, "install");
+		write(storage.gamePath("config/shared.txt"), edited);
+		write(storage.overlayFile(modpackId, "config/shared.txt"), edited);
+		ClientObjectStore.storeObject(storage, HashUtils.sha1(edited), edited);
+		byte[] corrupt = "AutoModpack autotester deliberate corruption\n".getBytes(StandardCharsets.UTF_8);
+		corruptInPlace(storage.objectFile(alphaHash), corrupt);
+		corruptInPlace(storage.gamePath("config/beta.json"), corrupt);
+		Files.deleteIfExists(storage.objectFile(deltaHash));
+		Files.deleteIfExists(storage.activePath("config/delta.txt"));
+		Files.deleteIfExists(storage.gamePath("config/delta.txt"));
+		OfflineRepair repair = new OfflineRepair(storage);
+
+		OfflineRepair.Prepared before = repair.inspect(new OfflineRepair.Request(target, Set.of(), null));
+		OfflineRepair.Receipt receipt = repair.apply(before, Set.of("config/shared.txt"), Set.of("mods/local-unowned.jar"));
+
+		assertEquals(List.of("mods/local-unowned.jar"), before.unownedModPaths());
+		OfflineRepair.Prepared after = receipt.after();
+		Set<String> repairable = after.findings().stream().filter(OfflineRepair.Finding::locallyRepairable)
+				.map(finding -> finding.place() + " " + finding.logicalPath()).collect(Collectors.toSet());
+		assertEquals(Set.of(), repairable, "every locally repairable byte must be repaired");
+		assertTrue(after.findings().stream().allMatch(finding -> finding.condition() == OfflineRepair.Condition.MISSING && finding.logicalPath().equals("config/delta.txt")),
+				() -> "only the unavailable delta may remain: " + after.findings());
+		assertTrue(after.editableResetCandidates().isEmpty());
+		assertTrue(after.unownedModPaths().isEmpty());
+		assertTrue(after.requiresUpdate());
+		assertFalse(Files.exists(unowned));
+		assertEquals("pack-a-default\n", Files.readString(storage.gamePath("config/shared.txt"), StandardCharsets.UTF_8));
+		assertEquals("amp-autotest-alpha-v2\n", Files.readString(storage.gamePath("config/alpha.txt"), StandardCharsets.UTF_8));
+		assertEquals("{\"id\":\"beta\",\"value\":43}", Files.readString(storage.gamePath("config/beta.json"), StandardCharsets.UTF_8));
+	}
+
+	private void link(Path existing, Path linkPath) throws Exception {
+		Files.createDirectories(linkPath.getParent());
+		Files.createLink(linkPath, existing);
+	}
+
+	private void corruptInPlace(Path path, byte[] payload) throws Exception {
+		PosixFileAttributeView posix = Files.getFileAttributeView(path, PosixFileAttributeView.class);
+		DosFileAttributeView dos = Files.getFileAttributeView(path, DosFileAttributeView.class);
+		Set<PosixFilePermission> original = posix == null ? null : posix.readAttributes().permissions();
+		boolean readOnly = dos != null && dos.readAttributes().isReadOnly();
+		if (posix != null) {
+			Set<PosixFilePermission> writable = EnumSet.copyOf(original);
+			writable.add(PosixFilePermission.OWNER_WRITE);
+			posix.setPermissions(writable);
+		} else if (readOnly) {
+			dos.setReadOnly(false);
+		}
+		try {
+			Files.write(path, payload);
+		} finally {
+			if (posix != null) posix.setPermissions(original);
+			else if (readOnly) dos.setReadOnly(true);
+		}
+	}
+
+	private ClientStorage storage() throws Exception {
+		ClientStorage storage = TestDataRoot.open(temporaryDirectory.resolve("game"), temporaryDirectory.resolve("data"));
+		Files.createDirectories(storage.modsDirectory());
+		return storage;
+	}
+
+	private static long regularFileCount(Path root) throws Exception {
+		try (var paths = Files.walk(root)) {
+			return paths.filter(Files::isRegularFile).count();
+		}
+	}
+
+	private static SelectedModpackTarget install(ClientStorage storage, FileSpec... specs) throws Exception {
+		ModpackJsons.CompleteModpackContentFields fields = new ModpackJsons.CompleteModpackContentFields();
+		fields.modpackId = "abc1234";
+		fields.modpackName = "Test";
+		ModpackJsons.CompleteModpackContentFields.ModpackGroupFields group = new ModpackJsons.CompleteModpackContentFields.ModpackGroupFields();
+		group.required = true;
+		Map<String, ModpackJsons.CompleteModpackContentFields.GroupFileFields> files = new LinkedHashMap<>();
+		for (FileSpec spec : specs) files.put(spec.path(), new ModpackJsons.CompleteModpackContentFields.GroupFileFields(String.valueOf(spec.size()), spec.type(), spec.editable(), spec.hash(), "0"));
+		group.files = files;
+		fields.categories = Map.of("General", Map.of("main", group));
+		PackDocument document = TestPacks.document(GroupManifestValidator.validate(fields));
+		TestPacks.stageGeneration(storage, document);
+		SelectedModpackTarget target = SelectedModpackTarget.prepare(document, null, new SelectionIntent(Set.of("main")), ClientPlatform.LINUX);
+		new ClientSelectionStore(storage.selectionFile()).compareAndSet(document.manifest().modpackId(), null, target.selection().intent());
+		storage.writeActiveState(document.manifest().modpackId(), document.contentToken(), document.ownershipLedger().toFields());
+		return target;
+	}
+
+	private static Path write(Path path, byte[] bytes) throws Exception {
+		Files.createDirectories(path.getParent());
+		if (Files.exists(path) && ImmutableFiles.isProtected(path)) Files.delete(path);
+		return Files.write(path, bytes);
+	}
+
+	private record FileSpec(String path, String type, boolean editable, String hash, long size) {}
+}

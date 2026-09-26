@@ -12,22 +12,25 @@
     "core.PlayerManagerMixin",
     "core.ServerLoginNetworkHandlerAccessor",
     "core.ServerLoginNetworkHandlerMixin",
-    "core.ServerNetworkIoMixin"
+    "core.ServerNetworkIoMixin",
+    "fabric.CommandsMixin"
   ],
   "client": [
     "core.ClientConnectionAccessor",
+    "core.DisconnectedScreenMixin",
+    "core.ClientPlayJoinMixin",
     "core.ClientLoginNetworkHandlerAccessor",
     "core.ClientLoginNetworkHandlerMixin",
     "core.ConnectScreenMixin",
     "core.DirectJoinServerScreenMixin",
     "core.EditServerScreenMixin",
     "core.ServerAddressMixin",
-    "core.ServerAddressResolverMixin",
     "core.ServerDataMixin",
     "core.MusicTrackerMixin",
     "core.JoinMultiplayerScreenMixin",
     "dev.MinecraftMixin",
-    "dev.ResourceLoadStateTrackerMixin"
+    "dev.ResourceLoadStateTrackerMixin",
+    "dev.GameRendererMixin"
   ],
   "injectors": {
     "defaultRequire": 1

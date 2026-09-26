@@ -34,7 +34,7 @@ The server then hosts that metadata and each modpack file indexed by its hash.
 
 When a client connects to the server:
 
-1. AutoModpack establishes a secure connection and prompts you to [verify the server's certificate fingerprint](https://moddedmc.wiki/en/project/automodpack/docs/technicals/certificate).
+1. AutoModpack establishes a secure connection and prompts you to [verify the server's certificate fingerprint](https://moddedmc.wiki/en/project/automodpack/latest/docs/security).
 2. It fetches the APIs for direct downloads of your modpack's files from Modrinth and CurseForge, where possible (mods,
    resource packs, shaders).
 3. Downloads all files to the client's automodpack folder.

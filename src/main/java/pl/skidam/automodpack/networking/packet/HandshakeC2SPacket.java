@@ -11,12 +11,13 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientHandshakePacketListenerImpl;
 import net.minecraft.network.FriendlyByteBuf;
 
+import pl.skidam.automodpack.client.ui.versioned.VersionedText;
 import pl.skidam.automodpack.networking.client.ClientLoginDisconnect;
 import pl.skidam.automodpack.networking.content.HandshakePacket;
+import pl.skidam.automodpack_core.client.SelfUpdater;
 import pl.skidam.automodpack_core.platforms.ModrinthAPI;
+import pl.skidam.automodpack_core.screen.ScreenManager;
 import pl.skidam.automodpack_core.utils.SemanticVersion;
-import pl.skidam.automodpack_loader_core.SelfUpdater;
-import pl.skidam.automodpack_loader_core.screen.ScreenManager;
 
 public class HandshakeC2SPacket {
 
@@ -40,7 +41,8 @@ public class HandshakeC2SPacket {
 
 			return CompletableFuture.completedFuture(outBuf);
 		} catch (Exception e) {
-			LOGGER.error("Error while handling HandshakeC2SPacket", e);
+			LOGGER.error("The server handshake is unreadable; disconnecting instead of joining unenforced", e);
+			ClientLoginDisconnect.disconnect(handler, VersionedText.literal("[AutoModpack] The server sent an unreadable handshake. Ask the server administrator to check the server and AutoModpack versions."));
 			return CompletableFuture.completedFuture(outBuf);
 		}
 	}
@@ -65,15 +67,14 @@ public class HandshakeC2SPacket {
 		ModrinthAPI automodpack = ModrinthAPI.getModSpecificVersion(SelfUpdater.AUTOMODPACK_ID, serverAMVersion, MC_VERSION);
 
 		if (automodpack == null) {
-			LOGGER.warn("Couldn't find {} version of automodpack for minecraft {} required by server", serverAMVersion, serverAMVersion);
+			LOGGER.warn("Couldn't find {} version of automodpack for minecraft {} required by server", serverAMVersion, serverMCVersion);
 			return;
 		}
 
 		SemanticVersion semver = SemanticVersion.parse(automodpack.fileVersion());
 
-		// Disconnect and install only if the update is valid
-		if (SelfUpdater.validUpdate(semver)) {
-			new ScreenManager().waiting();
+		if (SelfUpdater.validUpdate(semver, SemanticVersion.parse(AM_VERSION))) {
+			ScreenManager.waiting();
 			ClientLoginDisconnect.disconnect(handler);
 			SelfUpdater.installModVersion(automodpack);
 		}

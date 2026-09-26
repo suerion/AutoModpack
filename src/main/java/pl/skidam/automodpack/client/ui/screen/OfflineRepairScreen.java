@@ -1,0 +1,290 @@
+package pl.skidam.automodpack.client.ui.screen;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.Future;
+
+import net.minecraft.ChatFormatting;
+import net.minecraft.client.gui.components.AbstractWidget;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.Component;
+
+import pl.skidam.automodpack.client.ScreenImpl;
+import pl.skidam.automodpack.client.ui.TextColors;
+import pl.skidam.automodpack.client.ui.UiFormat;
+import pl.skidam.automodpack.client.ui.versioned.VersionedMatrices;
+import pl.skidam.automodpack.client.ui.versioned.VersionedScreen;
+import pl.skidam.automodpack.client.ui.versioned.VersionedText;
+import pl.skidam.automodpack.client.ui.widget.CheckboxWidget;
+import pl.skidam.automodpack.client.ui.widget.RowListWidget;
+import pl.skidam.automodpack_core.client.ClientOfflineRepair;
+import pl.skidam.automodpack_core.screen.FailureCategory;
+import pl.skidam.automodpack_core.screen.FailureDestination;
+import pl.skidam.automodpack_core.screen.FailureRequest;
+import pl.skidam.automodpack_core.screen.ScreenManager;
+import pl.skidam.automodpack_core.update.OfflineRepair;
+import pl.skidam.automodpack_core.utils.ActionAreaLayout;
+
+/** Reviews one cache-bypassing offline integrity inspection before any files are changed. */
+public final class OfflineRepairScreen extends VersionedScreen {
+	private static final int PANEL_WIDTH = 500;
+	private static final int ROW_HEIGHT = 22;
+
+	private final Screen parent;
+	private final String modpackName;
+	private final ClientOfflineRepair repair;
+	private final Runnable updateAction;
+	private final Runnable closedCallback;
+	private final Set<String> selectedEditablePaths = new TreeSet<>();
+	private OfflineRepair.Prepared prepared;
+	private OfflineRepair.Receipt receipt;
+	// Checkbox convention: [x] checked keeps the files in place; unchecked is the removal consent
+	// (copies land in the recovered folder). Same meaning on every screen.
+	private boolean keepUnownedMods;
+	private boolean busy;
+	private boolean presentingFailure;
+	private boolean closed;
+	private Future<?> work;
+
+	public OfflineRepairScreen(Screen parent, String modpackName, ClientOfflineRepair repair, OfflineRepair.Prepared prepared, Runnable updateAction, Runnable closedCallback) {
+		super(VersionedText.text("automodpack.repair.title"));
+		this.parent = parent;
+		this.modpackName = modpackName == null ? "" : modpackName;
+		this.repair = repair;
+		this.prepared = prepared;
+		this.updateAction = updateAction;
+		this.closedCallback = closedCallback;
+		prepared.editableResetCandidates().forEach(candidate -> selectedEditablePaths.add(candidate.logicalPath()));
+	}
+
+	@Override
+	protected void init() {
+		super.init();
+		int width = panelWidth(PANEL_WIDTH);
+		int x = panelLeft(PANEL_WIDTH);
+
+		List<OfflineRepair.EditableResetCandidate> candidates = prepared.editableResetCandidates();
+		boolean needsUpdate = prepared.requiresUpdate();
+		boolean canUpdate = needsUpdate && updateAction != null;
+		List<ActionRow> actions = new ArrayList<>();
+		boolean showKeepAll = !candidates.isEmpty() && !selectedEditablePaths.isEmpty();
+		if (showKeepAll)
+			actions.add(actionRow(ActionAreaLayout.RowKind.AUXILIARY,
+					optionalAction(VersionedText.text("automodpack.repair.keepAllEditable"), press -> keepAllEditable())));
+		List<ActionDefinition> primaryActions = new ArrayList<>();
+		primaryActions.add(primaryAction(VersionedText.text("automodpack.repair.apply"), press -> apply()));
+		if (canUpdate) primaryActions.add(optionalAction(VersionedText.text("automodpack.repair.updateAndFinish"), press -> updateAndFinish()));
+		actions.add(actionRow(ActionAreaLayout.RowKind.AUXILIARY, primaryActions.toArray(ActionDefinition[]::new)));
+		actions.add(actionRow(ActionAreaLayout.RowKind.FOOTER, secondaryAction(VersionedText.text("automodpack.back"), press -> back())));
+		ActionRow[] actionRows = actions.toArray(ActionRow[]::new);
+		List<RowListWidget.Row> listRows = new ArrayList<>(candidates.size());
+		for (OfflineRepair.EditableResetCandidate candidate : candidates) {
+			// Membership in selectedEditablePaths is the reset consent, so the row renders unchecked
+			// while it consents and checked once the player's changes are kept.
+			boolean resetConsent = selectedEditablePaths.contains(candidate.logicalPath());
+			listRows.add(new RowListWidget.Row(List.of(VersionedText.literal(truncateToWidth(this.font,
+					VersionedText.str("automodpack.repair.editableKeep", candidate.logicalPath()), width - 12))),
+					editableTooltip(resetConsent, candidate.logicalPath()),
+					resetConsent ? CheckboxWidget.State.UNCHECKED : CheckboxWidget.State.CHECKED));
+		}
+		// The list fills the space between the header state and the pinned actions; only a real overflow scrolls.
+		int actionsBottom = this.height - 28;
+		int listBottom = actionAreaTop(ActionAreaLayout.FOOTER_RAIL, actionsBottom, actionRows) - 8;
+		List<AbstractWidget> actionButtons = addActionArea(ActionAreaLayout.FOOTER_RAIL, actionsBottom, actionRows);
+		int actionIndex = 0;
+		if (showKeepAll) actionButtons.get(actionIndex++).active = !busy;
+		actionButtons.get(actionIndex++).active = !busy && hasRepairWork();
+		if (canUpdate) actionButtons.get(actionIndex).active = !busy;
+		RowListWidget list = null;
+		if (!candidates.isEmpty()) {
+			list = new RowListWidget(this.minecraft, this.width, this.height, panelWidth(PANEL_WIDTH), 0, listTop(), listBottom, ROW_HEIGHT, listRows,
+					index -> {
+						if (!busy) toggleEditable(candidates.get(index).logicalPath());
+					});
+			this.addRenderableWidget(list);
+		}
+		if (!prepared.unownedModPaths().isEmpty()) {
+			// The checkbox anchors to the list's real row left, so it and the row checkboxes share one x on every version.
+			int checkboxX = list == null ? x : list.rowLeft();
+			String files = String.join("\n", wrapToWidth(this.font, String.join(", ", prepared.unownedModPaths()), 240, 8));
+			AbstractWidget keep = new CheckboxWidget(this.font, checkboxX, keepCheckboxY(), x + width - checkboxX, VersionedText.text("automodpack.confirm.keepExistingMods", prepared.unownedModPaths().size()),
+					keepUnownedMods,
+					value -> {
+						keepUnownedMods = value;
+						rebuild();
+					});
+			keep.active = !busy;
+			VersionedScreen.setTooltip(keep, VersionedText.text("automodpack.confirm.leftoverTooltip", files));
+			this.addRenderableWidget(keep);
+		}
+	}
+
+	/** The header above the list wraps to real lines, so the list starts below the deepest line instead of a fixed guess. */
+	private int listTop() {
+		int headerEnd = statusBandTop() + (prepared.requiresUpdate() ? 24 : 12);
+		if (prepared.unownedModPaths().isEmpty()) return Math.max(prepared.requiresUpdate() ? 94 : 82, headerEnd + 4);
+		return headerEnd + 27;
+	}
+
+	/** Where the keep checkbox sits: one tight gap above the editable list's first checkbox. */
+	private int keepCheckboxY() {
+		return listTop() - 24;
+	}
+
+	/** Where the working/receipt/update-needed line sits: under the wrapped unowned line, never above the fixed band. */
+	private int statusBandTop() {
+		if (prepared.unownedModPaths().isEmpty()) return 66;
+		String unownedState = VersionedText.str(keepUnownedMods ? "automodpack.repair.unownedKept" : "automodpack.repair.unownedArchived", prepared.unownedModPaths().size());
+		return Math.max(66, 54 + wrapToWidth(this.font, unownedState, this.width - 28, 2).size() * 11 + 1);
+	}
+
+	private void toggleEditable(String path) {
+		if (!selectedEditablePaths.remove(path)) selectedEditablePaths.add(path);
+		rebuild();
+	}
+
+	private void keepAllEditable() {
+		selectedEditablePaths.clear();
+		rebuild();
+	}
+
+	/** Same help for an editable row: unchecked consents to reset, checked keeps the player's changes. */
+	private Component editableTooltip(boolean resetConsent, String path) {
+		return VersionedText.text(resetConsent ? "automodpack.repair.editableTooltipReset" : "automodpack.repair.editableTooltipKeep", path);
+	}
+
+	private boolean hasRepairWork() {
+		return prepared.findings().stream().anyMatch(OfflineRepair.Finding::locallyRepairable) || !selectedEditablePaths.isEmpty() || !keepUnownedMods && !prepared.unownedModPaths().isEmpty();
+	}
+
+	private void apply() {
+		apply(false);
+	}
+
+	private void apply(boolean updateAfterRepair) {
+		if (busy || closed || !hasRepairWork()) return;
+		busy = true;
+		rebuild();
+		Set<String> editable = Set.copyOf(selectedEditablePaths);
+		Set<String> unowned = keepUnownedMods ? Set.of() : Set.copyOf(prepared.unownedModPaths());
+		work = ScreenManager.background(() -> {
+			try {
+				OfflineRepair.Receipt result = repair.apply(prepared, editable, unowned);
+				this.minecraft.execute(() -> applied(result, updateAfterRepair));
+			} catch (Exception e) {
+				this.minecraft.execute(() -> fail(e));
+			}
+		});
+	}
+
+	private void applied(OfflineRepair.Receipt result, boolean updateAfterRepair) {
+		if (closed) return;
+		if (updateAfterRepair) {
+			closed = true;
+			ScreenImpl.setScreen(parent);
+			updateAction.run();
+			return;
+		}
+		receipt = result;
+		prepared = result.after();
+		Set<String> remaining = new HashSet<>();
+		prepared.editableResetCandidates().forEach(candidate -> remaining.add(candidate.logicalPath()));
+		selectedEditablePaths.retainAll(remaining);
+		keepUnownedMods = false;
+		busy = false;
+		rebuild();
+	}
+
+	private void updateAndFinish() {
+		if (busy || closed || updateAction == null) return;
+		if (hasRepairWork()) apply(true);
+		else {
+			closed = true;
+			ScreenImpl.setScreen(parent);
+			updateAction.run();
+		}
+	}
+
+	private void back() {
+		if (closed) return;
+		closed = true;
+		cancelWork();
+		closedCallback.run();
+		ScreenImpl.setScreen(parent);
+	}
+
+	private void fail(Exception exception) {
+		if (closed) return;
+		busy = false;
+		rebuild();
+		presentingFailure = true;
+		ScreenManager.failure(FailureRequest.of(exception, "automodpack.error.repair", FailureCategory.STORAGE, FailureDestination.CURRENT_SCREEN, null));
+	}
+
+	private void cancelWork() {
+		Future<?> current = work;
+		if (current != null && !current.isDone()) current.cancel(true);
+	}
+
+	@Override
+	public void removed() {
+		if (presentingFailure) {
+			presentingFailure = false;
+			super.removed();
+			return;
+		}
+		if (!closed) {
+			closed = true;
+			cancelWork();
+			closedCallback.run();
+		}
+		super.removed();
+	}
+
+	@Override
+	public void versionedRender(VersionedMatrices matrices, int mouseX, int mouseY, float delta) {
+		String title = VersionedText.str("automodpack.repair.titleNamed", modpackName);
+		drawCenteredTextWithShadow(matrices, this.font, VersionedText.literal(truncateToWidth(this.font, title, this.width - 20)).withStyle(ChatFormatting.BOLD), this.width / 2, 12, TextColors.WHITE);
+		long missing = prepared.findings().stream().filter(finding -> finding.condition() == OfflineRepair.Condition.MISSING).count();
+		long damaged = prepared.findings().stream().filter(finding -> finding.condition() != OfflineRepair.Condition.MISSING).count();
+		long repairable = prepared.findings().stream().filter(OfflineRepair.Finding::locallyRepairable).count();
+		String state = prepared.findings().isEmpty()
+				? VersionedText.str("automodpack.repair.healthy")
+				: VersionedText.str("automodpack.repair.findings", missing, damaged, repairable);
+		drawCenteredTextWithShadow(matrices, this.font, VersionedText.literal(truncateToWidth(this.font, state, this.width - 20)).withStyle(prepared.findings().isEmpty() ? ChatFormatting.GREEN : ChatFormatting.YELLOW),
+				this.width / 2, 30, TextColors.WHITE);
+		String hashed = VersionedText.str("automodpack.repair.hashed", prepared.directlyHashedFileCount(), UiFormat.formatSize(prepared.directlyHashedBytes()));
+		drawCenteredTextWithShadow(matrices, this.font, VersionedText.literal(truncateToWidth(this.font, hashed, this.width - 20)).withStyle(ChatFormatting.GRAY), this.width / 2, 42, TextColors.WHITE);
+		if (!prepared.unownedModPaths().isEmpty()) {
+			String unownedState = VersionedText.str(keepUnownedMods ? "automodpack.repair.unownedKept" : "automodpack.repair.unownedArchived", prepared.unownedModPaths().size());
+			List<String> unownedLines = wrapToWidth(this.font, unownedState, this.width - 28, 2);
+			for (int index = 0; index < unownedLines.size(); index++)
+				drawCenteredTextWithShadow(matrices, this.font, VersionedText.literal(unownedLines.get(index)).withStyle(keepUnownedMods ? ChatFormatting.YELLOW : ChatFormatting.GRAY),
+						this.width / 2, 54 + index * 11, TextColors.WHITE);
+		} else {
+			String choices = VersionedText.str("automodpack.repair.choices", selectedEditablePaths.size(), prepared.editableResetCandidates().size());
+			drawCenteredTextWithShadow(matrices, this.font, VersionedText.literal(truncateToWidth(this.font, choices, this.width - 20)).withStyle(ChatFormatting.AQUA), this.width / 2, 54, TextColors.WHITE);
+		}
+		if (busy) drawCenteredTextWithShadow(matrices, this.font, VersionedText.text("automodpack.repair.working").withStyle(ChatFormatting.YELLOW), this.width / 2, statusBandTop(), TextColors.WHITE);
+		else if (receipt != null) {
+			String result = VersionedText.text("automodpack.repair.receipt", receipt.repairedCasObjects(), receipt.repairedMaterializedFiles(), receipt.resetEditableFiles(), receipt.archivedUnownedMods())
+					.getString();
+			drawCenteredTextWithShadow(matrices, this.font, VersionedText.literal(truncateToWidth(this.font, result, this.width - 20)).withStyle(receipt.complete() ? ChatFormatting.GREEN : ChatFormatting.YELLOW),
+					this.width / 2, statusBandTop(), TextColors.WHITE);
+		} else if (prepared.requiresUpdate()) {
+			String updateMessage = VersionedText.str(updateAction == null ? "automodpack.repair.updateNeededOffline" : "automodpack.repair.updateNeeded");
+			List<String> lines = wrapToWidth(this.font, updateMessage, this.width - 28, 2);
+			for (int index = 0; index < lines.size(); index++)
+				drawCenteredTextWithShadow(matrices, this.font, VersionedText.literal(lines.get(index)).withStyle(ChatFormatting.YELLOW), this.width / 2, statusBandTop() + index * 12, TextColors.WHITE);
+		}
+	}
+
+	@Override
+	public boolean shouldCloseOnEsc() {
+		back();
+		return false;
+	}
+}

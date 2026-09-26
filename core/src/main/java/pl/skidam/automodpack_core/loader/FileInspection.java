@@ -1,0 +1,483 @@
+package pl.skidam.automodpack_core.loader;
+
+import static pl.skidam.automodpack_core.Constants.LOGGER;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.*;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+
+import pl.skidam.automodpack_core.Constants;
+import pl.skidam.automodpack_core.utils.FileIntegrity;
+import pl.skidam.automodpack_core.utils.JarUtils;
+import pl.skidam.automodpack_core.utils.MiniToml;
+import pl.skidam.automodpack_core.utils.cache.FileCache;
+
+public class FileInspection {
+
+	private static final Gson GSON = new Gson();
+
+	private static String getLoader() {
+		return Constants.LOADER;
+	}
+
+	public record HashPathPair(String hash, Path path) {}
+
+	public record Mod(Set<String> IDs, String hash, String version, Path path, Set<String> deps, Set<Mod> nestedMods, String id, Set<String> services) {
+		public Mod(Set<String> IDs, String hash, String version, Path path, Set<String> deps, Set<Mod> nestedMods) {
+			this(IDs, hash, version, path, deps, nestedMods, null, Set.of());
+		}
+
+		public Mod {
+			services = services == null ? Set.of() : Set.copyOf(services);
+		}
+
+		public Mod at(Path newPath) {
+			return new Mod(IDs, hash, version, newPath, deps, nestedMods, id, services);
+		}
+	}
+
+	private record ModMetadata(String modId, String version, Set<String> provides, Set<String> deps, LoaderManagerService.EnvironmentType environment, Set<String> declaredJars) {
+		ModMetadata {
+			declaredJars = declaredJars == null ? Set.of() : Set.copyOf(declaredJars);
+		}
+	}
+
+	public static Mod getMod(Path file, FileCache cache) {
+		if (isJarInvalid(file)) return null;
+
+		String hash = FileIntegrity.identityHash(file, cache);
+		if (hash == null) {
+			LOGGER.error("Failed to get hash for file: {}", file);
+			return null;
+		}
+
+		try (FileSystem fs = FileSystems.newFileSystem(file)) {
+			ModMetadata meta = getModMetadata(fs);
+
+			if (meta != null && meta.modId() != null) {
+				Set<String> ids = new HashSet<>(meta.provides());
+				ids.add(meta.modId());
+
+				Set<Mod> nestedMods = scanForNestedMods(fs, meta.declaredJars());
+				Set<String> services = Set.copyOf(getServices(fs, LoaderServicePaths.ALL_SERVICES));
+
+				if (meta.version() != null) return new Mod(ids, hash, meta.version(), file, meta.deps(), nestedMods, meta.modId(), services);
+				LOGGER.error("Incomplete mod info for file: {} (ID: {}, Ver: {})", file, meta.modId(), meta.version());
+			}
+		} catch (IOException e) {
+			LOGGER.debug("Failed to inspect mod file: {}", file);
+		}
+		return null;
+	}
+
+	public static boolean isMod(Path file) {
+		if (isJarInvalid(file)) return false;
+		try (FileSystem fs = FileSystems.newFileSystem(file)) {
+			return getModMetadata(fs) != null || hasSpecificServices(fs);
+		} catch (IOException e) {
+			return false;
+		}
+	}
+
+	public static boolean isModCompatible(Path file) {
+		if (isJarInvalid(file)) return false;
+
+		try (FileSystem fs = FileSystems.newFileSystem(file)) {
+			String entryPathString = metadataPathForLoader(getLoader());
+
+			if (entryPathString != null && Files.exists(fs.getPath(entryPathString))) return true;
+
+			if (("forge".equals(getLoader()) || "neoforge".equals(getLoader())) && hasSpecificServices(fs)) return true;
+		} catch (IOException e) {
+			LOGGER.error("Error examining JarJar in {}", e);
+		}
+		return false;
+	}
+
+	public static String getModVersion(Path file) {
+		return extractBasicInfo(file, ModMetadata::version);
+	}
+
+	public static String getModID(Path file) {
+		return extractBasicInfo(file, ModMetadata::modId);
+	}
+
+	public static boolean hasNestedModWithSameId(FileSystem fs) {
+		ModMetadata metadata = getModMetadata(fs);
+		if (metadata == null || metadata.modId() == null) return false;
+
+		Set<String> rootIds = new HashSet<>(metadata.provides());
+		rootIds.add(metadata.modId());
+		try (Stream<Path> walk = Files.walk(fs.getPath("/"))) {
+			return walk.filter(JarUtils::isRegularJar).anyMatch(path -> nestedModHasAnyId(path, rootIds));
+		} catch (IOException e) {
+			LOGGER.debug("Failed to inspect nested mod IDs");
+			return false;
+		}
+	}
+
+	private static boolean nestedModHasAnyId(Path path, Set<String> rootIds) {
+		try (InputStream is = Files.newInputStream(path)) {
+			Mod nested = readModFromStream(path, is);
+			return nested != null && !Collections.disjoint(rootIds, nested.IDs());
+		} catch (IOException e) {
+			LOGGER.debug("Skipping unreadable nested jar: {}", path);
+			return false;
+		}
+	}
+
+	public static LoaderManagerService.EnvironmentType getModEnvironment(Path file) {
+		return extractBasicInfo(file, ModMetadata::environment);
+	}
+
+	private static boolean isJarInvalid(Path file) {
+		if (file == null || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return true;
+		if (JarUtils.hasJarExtension(file)) return false;
+		try (InputStream input = Files.newInputStream(file)) {
+			int first = input.read();
+			int second = input.read();
+			int third = input.read();
+			int fourth = input.read();
+			return !(first == 'P' && second == 'K' && ((third == 3 && fourth == 4) || (third == 5 && fourth == 6) || (third == 7 && fourth == 8)));
+		} catch (IOException e) {
+			return true;
+		}
+	}
+
+	private static <T> T extractBasicInfo(Path file, Function<ModMetadata, T> extractor) {
+		if (isJarInvalid(file)) return null;
+		try (FileSystem fs = FileSystems.newFileSystem(file)) {
+			ModMetadata meta = getModMetadata(fs);
+			return meta != null ? extractor.apply(meta) : null;
+		} catch (IOException e) {
+			LOGGER.error("Error reading mod file {}: {}", file, e.getMessage());
+		}
+		return null;
+	}
+
+	/** Scans the declared nested JAR entries; {@code ModFileCache} caches the resulting inspection by content hash. */
+	private static Set<Mod> scanForNestedMods(FileSystem parentFs, Set<String> declaredJars) {
+		Set<Mod> nestedMods = new HashSet<>();
+		try (Stream<Path> walk = Files.walk(parentFs.getPath("/"))) {
+			for (Path path : walk.toList()) {
+				// Walk entries are absolute while declared paths are entry names, so both sides compare by the exact zip entry name the loader looks up.
+				String entryName = path.toString();
+				if (!JarUtils.isRegularJar(path) || !declaredJars.contains(entryName.startsWith("/") ? entryName.substring(1) : entryName)) continue;
+				try (InputStream is = Files.newInputStream(path)) {
+					Mod nested = readModFromStream(path, is);
+					if (nested != null) nestedMods.add(nested);
+				} catch (IOException e) {
+					LOGGER.debug("Skipping unreadable nested jar: {}", path);
+				}
+			}
+		} catch (IOException e) {
+			LOGGER.error("Error scanning nested mods: {}", e.getMessage());
+		}
+		return nestedMods;
+	}
+
+	/**
+	 * Reads a JAR from an InputStream (recursively) without mounting it as a FileSystem.
+	 */
+	private static Mod readModFromStream(Path virtualPath, InputStream is) {
+
+		// ZipInputStream must NOT close the underlying stream if it's a child stream
+		ZipInputStream zis = new ZipInputStream(is);
+		ZipEntry entry;
+		ModMetadata metadata = null;
+		Map<String, Mod> nestedChildren = new HashMap<>();
+
+		try {
+			while ((entry = zis.getNextEntry()) != null) {
+				String name = entry.getName();
+
+				if (isMetadataFilename(name)) {
+					// Prevent reader from closing the ZipInputStream
+					BufferedReader reader = new BufferedReader(new InputStreamReader(new FilterInputStream(zis) {
+						@Override
+						public void close() {}
+					}, StandardCharsets.UTF_8));
+
+					if (name.endsWith(".toml")) metadata = parseTomlMetadata(reader, name.endsWith("neoforge.mods.toml"));
+					else metadata = parseJsonMetadata(reader);
+				} else if (JarUtils.hasJarExtension(name)) {
+					// Wrap ZIS to protect current stream position
+					Mod child = readModFromStream(virtualPath.resolve(name), new FilterInputStream(zis) {
+						@Override
+						public void close() {}
+					});
+					if (child != null) nestedChildren.put(name, child);
+				}
+			}
+		} catch (IOException e) {
+			LOGGER.debug("Error processing stream for {}", virtualPath);
+		}
+
+		if (metadata != null && metadata.modId() != null) {
+			Set<String> ids = new HashSet<>(metadata.provides());
+			ids.add(metadata.modId());
+			Set<String> declaredJars = metadata.declaredJars();
+			Set<Mod> nestedMods = nestedChildren.entrySet().stream().filter(child -> declaredJars.contains(child.getKey())).map(Map.Entry::getValue).collect(Collectors.toSet());
+			// Investigate if we need hash or not
+			return new Mod(ids, null, metadata.version(), virtualPath, metadata.deps(), nestedMods, metadata.modId(), Set.of());
+		}
+		return null;
+	}
+
+	private static ModMetadata getModMetadata(FileSystem fs) {
+		Path metaPath = getMetadataPath(fs);
+		if (metaPath == null) return null;
+
+		try (BufferedReader reader = Files.newBufferedReader(metaPath)) {
+			if (metaPath.toString().endsWith(".toml")) {
+				return parseTomlMetadata(reader, metaPath.getFileName().toString().equals("neoforge.mods.toml"));
+			} else {
+				return parseJsonMetadata(reader);
+			}
+		} catch (IOException e) {
+			LOGGER.error("Error parsing metadata {}: {}", metaPath, e.getMessage());
+		}
+		return null;
+	}
+
+	private static ModMetadata parseTomlMetadata(BufferedReader reader, boolean neoforgeSemantics) {
+		try {
+			Map<String, Object> result = MiniToml.parse(reader);
+			List<Map<String, Object>> mods = MiniToml.getTables(result, "mods");
+			if (mods.isEmpty()) return null;
+
+			String modId = null;
+			String version = "1";
+			Set<String> provides = new HashSet<>();
+			Set<String> deps = new HashSet<>();
+			LoaderManagerService.EnvironmentType env = LoaderManagerService.EnvironmentType.UNIVERSAL;
+
+			for (Map<String, Object> modTable : mods) {
+				if (modId == null) modId = MiniToml.getString(modTable, "modId");
+
+				String v = MiniToml.getString(modTable, "version");
+				if (v != null && !v.equals("${file.jarVersion}")) version = v;
+
+				List<Object> prov = MiniToml.getList(modTable, "provides");
+				if (prov != null) for (Object p : prov) if (p instanceof String s) provides.add(s);
+			}
+
+			if (modId != null) {
+				// [[dependencies.<modId>]] is keyed by the mod's own id; a platform dependency's side says where the mod itself runs, feeding autoExcludeServerSideMods
+				Map<String, Object> depsTable = MiniToml.getTable(result, "dependencies");
+				if (depsTable != null) {
+					for (Map<String, Object> depTable : MiniToml.getTables(depsTable, modId)) {
+						String depId = MiniToml.getString(depTable, "modId");
+						if (depId == null) continue;
+
+						// NeoForge 20.5+ reads neoforge.mods.toml, gates on type alone and never reads mandatory; legacy
+						// Forge reads META-INF/mods.toml and gates on mandatory (absent means true). Type wins when both
+						// exist. The metadata file names the semantics, so a jar parses the same on every loader - a
+						// fabric client planning a neoforge pack included.
+						boolean required;
+						if (depTable.get("type") instanceof String typeName) required = "required".equalsIgnoreCase(typeName);
+						else if (neoforgeSemantics) required = true;
+						else required = !(depTable.get("mandatory") instanceof Boolean flag && !flag);
+						if (!required) continue;
+
+						deps.add(depId);
+
+						// Determine Environment based on Minecraft/Forge side requirement
+						if (isPlatformId(depId)) {
+							String side = MiniToml.getString(depTable, "side");
+							if ("client".equalsIgnoreCase(side)) env = LoaderManagerService.EnvironmentType.CLIENT;
+							else if ("server".equalsIgnoreCase(side)) env = LoaderManagerService.EnvironmentType.SERVER;
+						}
+					}
+				}
+			}
+			return new ModMetadata(modId, version, provides, deps, env, Set.of());
+		} catch (Exception e) {
+			LOGGER.error("TOML Parse Error: {}", e.getMessage());
+			return null;
+		}
+	}
+
+	private static ModMetadata parseJsonMetadata(BufferedReader reader) {
+		try {
+			JsonObject json = GSON.fromJson(reader, JsonObject.class);
+			String modId = getJsonString(json, "id");
+			String version = getJsonString(json, "version");
+			Set<String> provides = new HashSet<>();
+			Set<String> deps = new HashSet<>();
+			LoaderManagerService.EnvironmentType env = LoaderManagerService.EnvironmentType.UNIVERSAL;
+
+			if (json.has("provides")) {
+				for (JsonElement e : json.get("provides").getAsJsonArray()) {
+					if (e.isJsonObject()) provides.add(e.getAsJsonObject().get("id").getAsString());
+					else provides.add(e.getAsString());
+				}
+			}
+
+			if (json.has("depends")) {
+				JsonElement depends = json.get("depends");
+				if (depends.isJsonObject()) {
+					deps.addAll(depends.getAsJsonObject().keySet());
+				} else if (depends.isJsonArray()) {
+					for (JsonElement e : depends.getAsJsonArray()) {
+						if (e.isJsonObject()) deps.add(e.getAsJsonObject().get("id").getAsString());
+						else deps.add(e.getAsString());
+					}
+				}
+			}
+
+			if (json.has("environment")) {
+				String envStr = json.get("environment").getAsString();
+				if ("client".equalsIgnoreCase(envStr)) env = LoaderManagerService.EnvironmentType.CLIENT;
+				else if ("server".equalsIgnoreCase(envStr)) env = LoaderManagerService.EnvironmentType.SERVER;
+			}
+
+			Set<String> declaredJars = new HashSet<>();
+			if (json.has("jars") && json.get("jars").isJsonArray()) {
+				for (JsonElement element : json.get("jars").getAsJsonArray()) {
+					if (!element.isJsonObject()) continue;
+					JsonElement file = element.getAsJsonObject().get("file");
+					if (file != null && file.isJsonPrimitive() && !file.getAsString().isBlank()) declaredJars.add(file.getAsString());
+				}
+			}
+
+			return new ModMetadata(modId, version, provides, deps, env, declaredJars);
+		} catch (Exception e) {
+			LOGGER.error("JSON Parse Error: {}", e.getMessage());
+			return null;
+		}
+	}
+
+	private static boolean isPlatformId(String id) {
+		return "minecraft".equals(id) || "neoforge".equals(id) || "forge".equals(id);
+	}
+
+	private static String getJsonString(JsonObject obj, String key) {
+		return obj.has(key) ? obj.get(key).getAsString() : null;
+	}
+
+	private record LoaderMetadata(String loader, String path) {}
+
+	/** Every recognized mod-metadata location, in probe order. */
+	private static final List<LoaderMetadata> METADATA_LOCATIONS = List.of(new LoaderMetadata("neoforge", "META-INF/neoforge.mods.toml"), new LoaderMetadata("fabric", "fabric.mod.json"),
+			new LoaderMetadata("forge", "META-INF/mods.toml"));
+
+	/** The metadata file the running loader prefers, or null when the running loader has none. */
+	private static String metadataPathForLoader(String loader) {
+		return METADATA_LOCATIONS.stream().filter(location -> location.loader().equals(loader)).findFirst().map(LoaderMetadata::path).orElse(null);
+	}
+
+	private static Path getMetadataPath(FileSystem fs) {
+		String preferredEntry = metadataPathForLoader(getLoader());
+
+		if (preferredEntry != null) {
+			Path p = fs.getPath(preferredEntry);
+			if (Files.exists(p)) return p;
+		}
+
+		for (LoaderMetadata location : METADATA_LOCATIONS) {
+			if (location.path().equals(preferredEntry)) continue;
+			Path p = fs.getPath(location.path());
+			if (Files.exists(p)) return p;
+		}
+		return null;
+	}
+
+	private static boolean isMetadataFilename(String name) {
+		return name.endsWith("mods.toml") || name.endsWith("mod.json");
+	}
+
+	/**
+	 * Whether this jar ships any recognized loader-service file, root or nested - used to tell a
+	 * service mod apart from a plain mod. Recognition is loader-agnostic (the running loader isn't
+	 * known yet in all callers), so this checks the full cross-loader union.
+	 */
+	private static boolean hasSpecificServices(FileSystem fs) {
+		Set<String> known = LoaderServicePaths.ALL_SERVICES;
+		// Short-circuit on the first root match (the common case for service mods) before paying
+		// for the nested jarjar scan - isMod/isModCompatible call this over every mod.
+		for (String service : known) {
+			if (Files.exists(fs.getPath(service))) return true;
+		}
+		Set<String> nested = new HashSet<>();
+		collectSpecificServicesNested(fs, known, nested, true);
+		return !nested.isEmpty();
+	}
+
+	/**
+	 * The {@code ofInterest} loader-service files this jar provides, both at its root and inside any
+	 * {@code META-INF/jarjar} nested jars. Callers pass whichever set is relevant to them (e.g. a
+	 * loader module's own known/handleable services) instead of a hardcoded loader namespace.
+	 */
+	public static Set<String> getServices(FileSystem fs, Set<String> ofInterest) {
+		Set<String> found = new HashSet<>();
+
+		// Root FileSystem
+		for (String service : ofInterest) {
+			if (Files.exists(fs.getPath(service))) found.add(service);
+		}
+
+		// Nested JARs in META-INF/jarjar
+		collectSpecificServicesNested(fs, ofInterest, found, false);
+
+		return found;
+	}
+
+	/** Same over a jar file: the only service read that works for a service-only jar, which has no mod metadata to inspect. */
+	public static Set<String> getServices(Path file, Set<String> ofInterest) {
+		if (isJarInvalid(file)) return Set.of();
+		try (FileSystem fs = FileSystems.newFileSystem(file)) {
+			return getServices(fs, ofInterest);
+		} catch (IOException e) {
+			LOGGER.debug("Failed to read loader services of {}", file);
+			return Set.of();
+		}
+	}
+
+	/**
+	 * @param stopAtFirst
+	 *            {@code true} to stop at the first match (the {@link #hasSpecificServices}
+	 *            hot path), {@code false} to collect every match ({@link #getServices}).
+	 */
+	private static void collectSpecificServicesNested(FileSystem fs, Set<String> known, Set<String> found, boolean stopAtFirst) {
+		Path jarJarDir = fs.getPath("META-INF", "jarjar");
+
+		if (Files.notExists(jarJarDir)) return;
+
+		try (DirectoryStream<Path> stream = Files.newDirectoryStream(jarJarDir, "*.jar")) {
+			for (Path nestedJar : stream) {
+				collectNestedJarServices(nestedJar, known, found, stopAtFirst);
+				if (stopAtFirst && !found.isEmpty()) return;
+			}
+		} catch (IOException e) {
+			LOGGER.error("Error examining JarJar directory in {}", fs, e);
+		}
+	}
+
+	private static void collectNestedJarServices(Path nestedJarPath, Set<String> known, Set<String> found, boolean stopAtFirst) {
+		try (InputStream is = Files.newInputStream(nestedJarPath);
+				BufferedInputStream bis = new BufferedInputStream(is);
+				ZipInputStream zip = new ZipInputStream(bis)) {
+
+			ZipEntry entry;
+			while ((entry = zip.getNextEntry()) != null) {
+				if (known.contains(entry.getName())) {
+					found.add(entry.getName());
+					if (stopAtFirst) return;
+				}
+			}
+		} catch (IOException e) {
+			LOGGER.error("Error reading nested JAR {}: {}", nestedJarPath, e.getMessage());
+		}
+	}
+}

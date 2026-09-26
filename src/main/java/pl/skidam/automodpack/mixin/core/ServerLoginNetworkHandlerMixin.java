@@ -8,6 +8,8 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import pl.skidam.automodpack.networking.server.ServerLoginNetworkAddon;
 
 @Mixin(value = ServerLoginPacketListenerImpl.class, priority = 300)
@@ -25,9 +27,9 @@ public abstract class ServerLoginNetworkHandlerMixin {
 	 *   HELLO, KEY, AUTHENTICATING:  no-op (just timeout counter)
 	 *   NEGOTIATING:                  no-op (just timeout counter)
 	 *   READY_TO_ACCEPT (≤ 1.20.1):  calls handleAcceptedLogin()
-	 *                                   — login finalization + compression setup
+	 *                                   - login finalization + compression setup
 	 *   VERIFYING     (≥ 1.21.1):    calls verifyLoginAndFinishConnectionSetup()
-	 *                                   — login finalization + compression setup
+	 *                                   - login finalization + compression setup
 	 *   DELAY_ACCEPT  (≤ 1.20.1):    duplicate player check
 	 *   WAITING_FOR_DUPE_DISCONNECT: duplicate player check
 	 */
@@ -42,15 +44,9 @@ public abstract class ServerLoginNetworkHandlerMixin {
 		this.automodpack$addon = new ServerLoginNetworkAddon((ServerLoginPacketListenerImpl) (Object) this);
 	}
 
-	@Inject(method = "handleCustomQueryPacket", at = @At("HEAD"), cancellable = true)
-	private void handleCustomPayload(ServerboundCustomQueryAnswerPacket packet, CallbackInfo ci) {
-		if (this.automodpack$addon == null) {
-			return;
-		}
-
-		if (this.automodpack$addon.handle(packet)) {
-			ci.cancel();
-		}
+	@WrapMethod(method = "handleCustomQueryPacket")
+	private void handleCustomPayload(ServerboundCustomQueryAnswerPacket packet, Operation<Void> original) {
+		if (this.automodpack$addon == null || !this.automodpack$addon.handle(packet)) original.call(packet);
 	}
 
 	/*
@@ -58,11 +54,11 @@ public abstract class ServerLoginNetworkHandlerMixin {
 	 * exchange completes. Both NEGOTIATING and READY_TO_ACCEPT/VERIFYING
 	 * are checked, but for different reasons:
 	 *
-	 *   NEGOTIATING — START queries.  tick() is a no-op here, so we use
+	 *   NEGOTIATING - START queries.  tick() is a no-op here, so we use
 	 *   this state to call queryTick() which sends the initial handshake
 	 *   query.  Cancel is harmless (tick does nothing critical).
 	 *
-	 *   READY_TO_ACCEPT / VERIFYING — PREVENT finalization.  In this state
+	 *   READY_TO_ACCEPT / VERIFYING - PREVENT finalization.  In this state
 	 *   tick() calls the login finaliser (handleAcceptedLogin /
 	 *   verifyLoginAndFinishConnectionSetup) which sets up compression and
 	 *   places the player.  We MUST cancel to delay this step until queries
@@ -89,27 +85,30 @@ public abstract class ServerLoginNetworkHandlerMixin {
 	 * before the connection is ready for custom queries, and tick() does
 	 * non-trivial work in those states.
 	 */
-	@Inject(method = "tick", at = @At("HEAD"), cancellable = true)
-	private void sendOurPackets(CallbackInfo ci) {
+	@WrapMethod(method = "tick")
+	private void sendOurPackets(Operation<Void> original) {
 		if (this.automodpack$addon == null) {
+			original.call();
 			return;
 		}
 
 		/*? if <= 1.20.1 {*/
 		/*if (this.state != ServerLoginPacketListenerImpl.State.NEGOTIATING && this.state != ServerLoginPacketListenerImpl.State.READY_TO_ACCEPT) {
+			original.call();
 			return;
 		}
 		*//*?} else {*/
 		if (this.state != ServerLoginPacketListenerImpl.State.NEGOTIATING && this.state != ServerLoginPacketListenerImpl.State.VERIFYING) {
+			original.call();
 			return;
 		}
 		/*?}*/
 
 		if (!this.automodpack$addon.queryTick()) {
-			ci.cancel();
 			return;
 		}
 
 		this.automodpack$addon = null;
+		original.call();
 	}
 }

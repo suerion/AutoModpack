@@ -14,7 +14,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 # Fetch by ref so HEADLESSMC_REF can be a branch, tag, or commit SHA (a shallow
-# `clone --branch` only accepts branch/tag names — fetching FETCH_HEAD also takes SHAs).
+# `clone --branch` only accepts branch/tag names - fetching FETCH_HEAD also takes SHAs).
 RUN git init -q . \
     && git remote add origin "${HEADLESSMC_REPO}" \
     && git fetch --depth 1 origin "${HEADLESSMC_REF}" \
@@ -31,9 +31,16 @@ RUN git init -q . \
 FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+# A POSIX locale makes the JDK encode file paths as ASCII, so any non-ASCII
+# mod file name cannot exist in the game directory; UTF-8 is the mod's contract.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 ENV HMC_HOME=/work/hmc-cache
 
-# HeadlessMC's LWJGL transformer does not need an X server or desktop Java runtime.
+# Most runs use HeadlessMC's LWJGL transformer. UI screenshot scenarios opt into
+# Xvfb and Mesa so Minecraft renders the real interface in a virtual display;
+# mesa-vulkan-drivers (lavapipe) completes that software stack for Minecraft
+# 26.3+, whose renderpearl backend rejects Xvfb's GLX visuals and renders
+# through Vulkan instead. iproute2 provides `tc` for the --netem qdisc.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -41,10 +48,24 @@ RUN apt-get update \
         unzip \
         bash \
         procps \
+        tini \
         libatomic1 \
+        libasound2t64 \
+        libgl1-mesa-dri \
+        libglx-mesa0 \
+        mesa-vulkan-drivers \
+        libxcursor1 \
+        libxi6 \
+        libxinerama1 \
+        libxrandr2 \
+        libxxf86vm1 \
         openjdk-17-jre-headless \
         openjdk-21-jre-headless \
         openjdk-25-jre-headless \
+        iproute2 \
+        ethtool \
+        xauth \
+        xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /opt/headlessmc /opt/automodpack /work/game /work/hmc-cache \
@@ -54,7 +75,7 @@ RUN mkdir -p /opt/headlessmc /opt/automodpack /work/game /work/hmc-cache \
 # Install the HeadlessMC launcher built above as the `hmc` command.
 COPY --from=hmc /headlessmc-launcher-wrapper.jar \
      /opt/headlessmc/headlessmc-launcher-wrapper.jar
-RUN printf '#!/usr/bin/env bash\nexec java -jar /opt/headlessmc/headlessmc-launcher-wrapper.jar "$@"\n' \
+RUN printf '#!/usr/bin/env bash\nexec java -Xmx2G -jar /opt/headlessmc/headlessmc-launcher-wrapper.jar "$@"\n' \
         > /usr/local/bin/hmc \
     && chmod +x /usr/local/bin/hmc
 

@@ -6,11 +6,10 @@ import pl.skidam.automodpack.client.audio.AudioManager;
 import pl.skidam.automodpack.modpack.Commands;
 import pl.skidam.automodpack.networking.ModPackets;
 import pl.skidam.automodpack_core.loader.LoaderManagerService;
-import pl.skidam.automodpack_loader_core.screen.ScreenManager;
+import pl.skidam.automodpack_core.screen.ScreenManager;
 
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
 
 import static pl.skidam.automodpack_core.Constants.*;
@@ -18,9 +17,8 @@ import static pl.skidam.automodpack_core.Constants.*;
 @Mod(MOD_ID + "_mod")
 public class ForgeInit {
 
-	public ForgeInit(/^? if >=1.19.2 {^/FMLJavaModLoadingContext context/^?}^/) {
+	public ForgeInit() {
 		preload = false;
-		ScreenManager.INSTANCE = new ScreenImpl();
 
 		long start = System.currentTimeMillis();
 		LOGGER.info("Launching AutoModpack...");
@@ -30,14 +28,9 @@ public class ForgeInit {
 		if (LOADER_MANAGER.getEnvironmentType() == LoaderManagerService.EnvironmentType.SERVER) {
 			Common.serverInit();
 		} else {
+			ScreenManager.install(new ScreenImpl());
 			ModPackets.registerC2SPackets();
-			new AudioManager(
-				/^? if >=1.19.2 {^/
-				context.getModEventBus()
-				/^?} else {^/
-				/^FMLJavaModLoadingContext.get().getModEventBus()
-				^//^?}^/
-			);
+			new AudioManager();
 		}
 
 

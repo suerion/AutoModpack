@@ -1,5 +1,6 @@
 package pl.skidam.automodpack.modpack;
 
+import pl.skidam.automodpack_core.config.ConnectionJsons;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -11,21 +12,34 @@ import net.minecraft.server.permissions.PermissionLevel;
 import pl.skidam.automodpack.client.ui.versioned.VersionedCommandSource;
 import pl.skidam.automodpack.client.ui.versioned.VersionedText;
 import pl.skidam.automodpack_core.auth.DnsPinResolver;
-import pl.skidam.automodpack_core.auth.SecretsStore;
+import pl.skidam.automodpack_core.auth.ProvisioningSecretStore;
 import pl.skidam.automodpack_core.auth.ServerAddressPin;
 import pl.skidam.automodpack_core.config.BootstrapConfig;
 import pl.skidam.automodpack_core.config.ConfigTools;
-import pl.skidam.automodpack_core.config.Jsons;
+import pl.skidam.automodpack_core.modpack.GroupInspector;
+import pl.skidam.automodpack_core.modpack.ModpackExecutor;
 import pl.skidam.automodpack_core.modpack.ModpackId;
+import pl.skidam.automodpack_core.modpack.generation.GenerationStore;
+import pl.skidam.automodpack_core.modpack.generation.JournalEntry;
+import pl.skidam.automodpack_core.modpack.generation.PackDocument;
 import pl.skidam.automodpack_core.protocol.ModpackConnectionMode;
+import pl.skidam.automodpack_core.protocol.netty.ActivityTracker;
+import pl.skidam.automodpack_core.utils.ByteFormat;
 import pl.skidam.automodpack_core.utils.AddressHelpers;
-import pl.skidam.automodpack_core.utils.ModpackContentTools;
+import pl.skidam.automodpack_core.storage.GameDirectory;
+import pl.skidam.automodpack_core.storage.StoragePaths;
+import pl.skidam.automodpack_core.utils.Throwables;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
-import java.util.Objects;
-import java.util.Set;
+import java.util.Optional;
 import net.minecraft.ChatFormatting;
 import net.minecraft.util.Util;
 import net.minecraft.commands.CommandSourceStack;
@@ -41,13 +55,41 @@ import static pl.skidam.automodpack_core.Constants.*;
 public class Commands {
 
 	public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
+		var generateIfContentNode = literal("if-content")
+				.then(argument("content-token", StringArgumentType.word()).executes(Commands::guardedGenerateModpack)
+						.then(literal("notes")
+								.then(argument("notes", StringArgumentType.greedyString()).executes(Commands::guardedGenerateModpack))));
+		var generateRevertNode = literal("revert")
+				.then(argument("seq", StringArgumentType.word()).executes(Commands::previewRevertGeneration)
+						.then(literal("confirm")
+								.executes(Commands::revertGeneration)
+								.then(literal("notes")
+										.then(argument("notes", StringArgumentType.greedyString()).executes(Commands::revertGeneration)))));
+		var generateStorageNode = literal("storage")
+				.executes(Commands::generationStorage)
+				.then(literal("collect")
+						.then(literal("confirm").executes(Commands::generationStorageCollect)));
+		var generateNode = literal("generate")
+				.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
+				.executes(Commands::generateModpack)
+				.then(literal("notes")
+						.then(argument("notes", StringArgumentType.greedyString()).executes(Commands::generateModpack)))
+				.then(literal("preview")
+						.executes(Commands::previewModpack)
+						.then(literal("notes")
+								.then(argument("notes", StringArgumentType.greedyString()).executes(Commands::previewModpack))))
+			.then(generateIfContentNode)
+			.then(generateRevertNode)
+			.then(literal("history").executes(Commands::generationHistory))
+			.then(generateStorageNode)
+			.then(literal("export-http")
+					.then(argument("directory", StringArgumentType.greedyString()).executes(Commands::exportHttpTree))
+					.then(literal("--all")
+							.then(argument("directory", StringArgumentType.greedyString()).executes(Commands::exportHttpTreeAll))));
 		var automodpackNode = dispatcher.register(
 				literal("automodpack")
 						.executes(Commands::about)
-						.then(literal("generate")
-								.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
-								.executes(Commands::generateModpack)
-						)
+						.then(generateNode)
 						.then(literal("host")
 								.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
 								.executes(Commands::modpackHostAbout)
@@ -63,9 +105,9 @@ public class Commands {
 										.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
 										.executes(Commands::restartModpackHost)
 								)
-								.then(literal("connections")
+								.then(literal("activity")
 										.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
-										.executes(Commands::connections)
+										.executes(Commands::activity)
 								)
 								.then(literal("fingerprint")
 										.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
@@ -101,13 +143,20 @@ public class Commands {
 										)
 								)
 						)
-						.then(literal("config")
-								.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
-								.then(literal("reload")
-										.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
-										.executes(Commands::reload)
-								)
-						)
+					.then(literal("config")
+							.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
+							.then(literal("reload")
+									.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
+									.executes(Commands::reload)
+							)
+					)
+					.then(literal("groups")
+							.requires((source) -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.byId(3))))
+							.executes(Commands::modpackGroups)
+							.then(argument("group-id", StringArgumentType.word())
+									.executes(Commands::modpackGroupDetail)
+							)
+					)
 		);
 
 		dispatcher.register(
@@ -201,7 +250,7 @@ public class Commands {
 			InetSocketAddress endpoint = AddressHelpers.parseEndpoint(
 					AddressHelpers.formatAddress(AddressHelpers.format(serverConfig.advertisedEndpointHost, serverConfig.advertisedEndpointPort)));
 			return writeBootstrap(context,
-					BootstrapConfig.install(origin, requireBootstrapFingerprint(), requirePublishedModpackId(), endpoint, serverConfig.connectionMode), true);
+					BootstrapConfig.install(origin, requireBootstrapFingerprint(), requirePublishedModpackId(), endpoint, serverConfig.connectionMode, requireProvisioningSecret()), true);
 		} catch (IllegalArgumentException e) {
 			send(context, e.getMessage(), ChatFormatting.RED, false);
 			return 0;
@@ -212,10 +261,9 @@ public class Commands {
 		try {
 			InetSocketAddress origin = AddressHelpers.parseOrigin(StringArgumentType.getString(context, "origin"));
 			InetSocketAddress endpoint = AddressHelpers.parseEndpoint(StringArgumentType.getString(context, "endpoint"));
-			ModpackConnectionMode connectionMode = ModpackConnectionMode.valueOf(
-					StringArgumentType.getString(context, "connection-mode").toUpperCase(Locale.ROOT));
+			ModpackConnectionMode connectionMode = parseConnectionMode(StringArgumentType.getString(context, "connection-mode"));
 			return writeBootstrap(context,
-					BootstrapConfig.install(origin, requireBootstrapFingerprint(), requirePublishedModpackId(), endpoint, connectionMode), true);
+					BootstrapConfig.install(origin, requireBootstrapFingerprint(), requirePublishedModpackId(), endpoint, connectionMode, requireProvisioningSecret()), true);
 		} catch (IllegalArgumentException e) {
 			send(context, e.getMessage(), ChatFormatting.RED, false);
 			return 0;
@@ -229,34 +277,44 @@ public class Commands {
 		return fingerprint;
 	}
 
-	private static String requirePublishedModpackId() {
-		Jsons.ModpackContentFields content = ModpackContentTools.read(hostModpackContentFile);
-		if (content == null || !ModpackId.isValid(content.modpackId)) throw new IllegalArgumentException("No valid published modpack ID is available; generate the modpack first");
-		return content.modpackId;
+	private static String requireProvisioningSecret() {
+		return ProvisioningSecretStore.ensure();
 	}
 
-	private static int writeBootstrap(CommandContext<CommandSourceStack> context, Jsons.KnownHostsBootstrapFields fields, boolean install) {
+	private static String requirePublishedModpackId() {
 		try {
-			ConfigTools.writeAtomic(knownHostsBootstrapFile, fields);
+			PackDocument current = modpackExecutor.currentDocument().orElseThrow(() -> new IllegalArgumentException("No published modpack is available; generate the modpack first"));
+			return ModpackId.requireValid(current.manifest().modpackId());
+		} catch (IOException e) {
+			throw new IllegalArgumentException("The published modpack is invalid; check the server logs", e);
+		}
+	}
+
+	private static int writeBootstrap(CommandContext<CommandSourceStack> context, ConnectionJsons.KnownHostsBootstrapFields fields, boolean install) {
+		Path bootstrapPath = GameDirectory.current().resolve(StoragePaths.BOOTSTRAP_EXPORT_FILE).normalize();
+		try {
+			ConfigTools.writeAtomic(bootstrapPath, fields);
 		} catch (IOException e) {
 			LOGGER.error("Failed to export bootstrap file", e);
 			send(context, "Failed to write bootstrap file: " + e.getMessage(), ChatFormatting.RED, false);
 			return 0;
 		}
 
-		String absolutePath = knownHostsBootstrapFile.toAbsolutePath().normalize().toString();
+		String absolutePath = bootstrapPath.toAbsolutePath().normalize().toString();
 		send(context, "Bootstrap file exported", ChatFormatting.GREEN, copyable(absolutePath), ChatFormatting.YELLOW, false);
-		send(context, "Package it on clients at", ChatFormatting.WHITE, copyable("automodpack/automodpack-bootstrap.json"), ChatFormatting.YELLOW, false);
-		if (install && serverConfig.validateSecrets) {
-			send(context,
-					"WARNING: validateSecrets=true. Fresh clients without an existing secret for this origin will fail preload download; disable validation or provision a normal login first.",
-					ChatFormatting.RED, false);
-		}
+		send(context, "Copy it to clients as", ChatFormatting.WHITE, copyable("automodpack/automodpack-bootstrap.json"), ChatFormatting.YELLOW, false);
+		send(context, "The exported file is not imported on this instance. Clients must already have AutoModpack installed.", ChatFormatting.GRAY, false);
+		if (install) send(context, "The file includes a provisioning secret. Treat it as a credential.", ChatFormatting.YELLOW, false);
 		return Command.SINGLE_SUCCESS;
 	}
 
 	private static MutableComponent copyable(String value) {
-		return VersionedText.literal(value).withStyle(style -> style
+		return copyable(value, value);
+	}
+
+	/** Shows {@code display}, click-copies {@code value}. */
+	private static MutableComponent copyable(String display, String value) {
+		return VersionedText.literal(display).withStyle(style -> style
 				/*? if >=1.21.5 {*/
 				.withHoverEvent(new HoverEvent.ShowText(VersionedText.translatable("chat.copy.click")))
 				.withClickEvent(new ClickEvent.CopyToClipboard(value)));
@@ -266,41 +324,108 @@ public class Commands {
 		*//*?}*/
 	}
 
-	private static int connections(CommandContext<CommandSourceStack> context) {
+	private static ModpackConnectionMode parseConnectionMode(String value) {
+		try {
+			return ModpackConnectionMode.valueOf(value.toUpperCase(Locale.ROOT));
+		} catch (IllegalArgumentException e) {
+			StringBuilder modes = new StringBuilder();
+			for (ModpackConnectionMode mode : ModpackConnectionMode.values()) {
+				if (modes.length() > 0) modes.append(", ");
+				modes.append(mode.name());
+			}
+			throw new IllegalArgumentException("Unknown connection mode '" + value + "'; valid values: " + modes);
+		}
+	}
+
+	// Instants carry no clock fields, so the formatters need the zone to resolve them through; server-local matches the console's own clock.
+	private static final DateTimeFormatter ACTIVITY_CLOCK = DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT).withZone(ZoneId.systemDefault());
+	private static final DateTimeFormatter ACTIVITY_PRECISE_CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.ROOT).withZone(ZoneId.systemDefault());
+	private static final int ACTIVITY_SHOWN_ENTRIES = 5;
+
+	private static int activity(CommandContext<CommandSourceStack> context) {
 		Util.backgroundExecutor().execute(() -> {
-			var connections = hostServer.getConnections();
-			var uniqueSecrets = Set.copyOf(connections.values());
-
-			send(context, String.format("Active connections: %d Unique connections: %d ", connections.size(), uniqueSecrets.size()), ChatFormatting.YELLOW, false);
-
-			for (String secret : uniqueSecrets) {
-				var playerSecretPair = SecretsStore.getHostSecret(secret);
-				if (playerSecretPair == null) continue;
-
-				String playerId = playerSecretPair.getKey();
-				var profile = GameHelpers.getPlayerProfile(playerId);
-
-				long connNum = connections.values().stream().filter(secret::equals).count();
-
-				send(context, String.format("Player: %s (%s) is downloading modpack using %d connections", GameHelpers.getPlayerName(profile), playerId, connNum), ChatFormatting.GREEN, false);
+			try {
+				VersionedCommandSource.sendFeedback(context, activityMessage(hostServer.activitySnapshot()), false);
+			} catch (Exception e) {
+				LOGGER.error("Failed to collect modpack activity", e);
+				send(context, "Failed to collect modpack activity: " + e.getMessage(), ChatFormatting.RED, false);
 			}
 		});
-
 		return Command.SINGLE_SUCCESS;
+	}
+
+	private static MutableComponent activityMessage(ActivityTracker.Snapshot snapshot) {
+		String summary = "Activity since " + ACTIVITY_CLOCK.format(Instant.ofEpochMilli(snapshot.startedMillis())) + ": " + snapshot.totalRequests() + " requests · " + ByteFormat.formatSize(snapshot.totalBytes()) + " from " + snapshot.players().size() + " players";
+		if (snapshot.writeThroughput() > 0) summary += " · " + ByteFormat.formatSpeed(snapshot.writeThroughput()) + " out";
+		summary += " · 401s: " + snapshot.unauthorized() + (snapshot.lastUnauthorizedMillis() == 0 ? "" : " (last " + ACTIVITY_CLOCK.format(Instant.ofEpochMilli(snapshot.lastUnauthorizedMillis())) + ")");
+		summary += " · unchanged checks: " + snapshot.unchangedChecks();
+		MutableComponent message = VersionedText.literal(summary).withStyle(ChatFormatting.YELLOW);
+		List<String> playerLines = new ArrayList<>();
+		for (ActivityTracker.PlayerStats player : snapshot.players())
+			playerLines.add(player.name() + ": " + player.requests() + " requests · " + ByteFormat.formatSize(player.bytes()) + " · last " + ACTIVITY_PRECISE_CLOCK.format(Instant.ofEpochMilli(player.lastMillis())));
+		if (!playerLines.isEmpty()) hover(message, String.join("\n", playerLines));
+		if (!snapshot.recent().isEmpty()) {
+			message.append(VersionedText.literal("\nLast: ").withStyle(ChatFormatting.YELLOW));
+			for (int i = 0; i < Math.min(ACTIVITY_SHOWN_ENTRIES, snapshot.recent().size()); i++) {
+				if (i > 0) message.append(VersionedText.literal(" · ").withStyle(ChatFormatting.WHITE));
+				message.append(activityEntry(snapshot.recent().get(i), false));
+			}
+		}
+		if (!snapshot.inFlight().isEmpty()) {
+			message.append(VersionedText.literal("\nIn flight (" + snapshot.inFlight().size() + "): ").withStyle(ChatFormatting.YELLOW));
+			for (int i = 0; i < Math.min(ACTIVITY_SHOWN_ENTRIES, snapshot.inFlight().size()); i++) {
+				if (i > 0) message.append(VersionedText.literal(" · ").withStyle(ChatFormatting.WHITE));
+				message.append(activityEntry(snapshot.inFlight().get(i), true));
+			}
+		}
+		return message;
+	}
+
+	private static MutableComponent activityEntry(ActivityTracker.Entry entry, boolean inFlight) {
+		long endMillis = inFlight ? System.currentTimeMillis() : entry.endMillis();
+		long seconds = (endMillis - entry.startMillis()) / 1000;
+		List<String> hover = new ArrayList<>();
+		hover.add("started " + ACTIVITY_PRECISE_CLOCK.format(Instant.ofEpochMilli(entry.startMillis())));
+		hover.add(entry.displayName());
+		if (entry.routeKey() != null && entry.routeKey().length() == 40) hover.add("sha1 " + entry.routeKey());
+		hover.add("address " + entry.address());
+		String size = ByteFormat.formatSize(entry.bytes());
+		String visible = ACTIVITY_CLOCK.format(Instant.ofEpochMilli(entry.startMillis())) + " " + (entry.actor() != null ? entry.actor() : entry.address()) + " " + ByteFormat.formatETA(seconds) + " " + size + " " + condensedName(entry);
+		if (inFlight) {
+			hover.add("in flight");
+		} else {
+			hover.add("finished " + ACTIVITY_PRECISE_CLOCK.format(Instant.ofEpochMilli(entry.endMillis())));
+			visible += entry.status() == ActivityTracker.STATUS_DROPPED ? " (cut)" : " (" + entry.status() + ")";
+		}
+		return hover(VersionedText.literal(visible), String.join("\n", hover));
+	}
+
+	/** Shows {@code component}, hover-shows the multi-line {@code text}. */
+	private static MutableComponent hover(MutableComponent component, String text) {
+		return component.withStyle(style -> style
+				/*? if >=1.21.5 {*/
+				.withHoverEvent(new HoverEvent.ShowText(VersionedText.literal(text))));
+				/*?} else {*/
+				/*.withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, VersionedText.literal(text))));
+				*//*?}*/
+	}
+
+	private static String condensedName(ActivityTracker.Entry entry) {
+		String name = entry.displayName();
+		int slash = name.lastIndexOf('/');
+		return slash < 0 ? name : name.substring(slash + 1);
 	}
 
 	private static int reload(CommandContext<CommandSourceStack> context) {
 		Util.backgroundExecutor().execute(() -> {
-			var tempServerConfig = ConfigTools.read(serverConfigFile, Jsons.ServerConfigFieldsV3.class).orElse(null);
-			if (tempServerConfig != null) {
-				ConfigUtils.normalizeServerConfig(tempServerConfig, true);
-				boolean restartRequired = connectionRuntimeChanged(serverConfig, tempServerConfig);
-				serverConfig = tempServerConfig;
-				send(context, "AutoModpack server config reloaded!", ChatFormatting.GREEN, true);
-				if (restartRequired) send(context, "Connection settings changed. Run /automodpack host restart to apply them.", ChatFormatting.YELLOW, false);
-			} else {
+			var reloaded = ConfigUtils.reloadServerConfig();
+			if (reloaded.isEmpty()) {
 				send(context, "Error while reloading config file!", ChatFormatting.RED, true);
+				return;
 			}
+			send(context, "AutoModpack server config reloaded!", ChatFormatting.GREEN, true);
+			if (reloaded.get().connectionSettingsChanged())
+				send(context, "Connection settings changed. Run /automodpack host restart to apply them.", ChatFormatting.YELLOW, false);
 		});
 
 		return Command.SINGLE_SUCCESS;
@@ -354,20 +479,16 @@ public class Commands {
 
 	private static void reportHostStart(CommandContext<CommandSourceStack> context, String action) {
 		if (hostServer.isRunning()) {
-			send(context, "Modpack hosting " + action + "!", ChatFormatting.GREEN, true);
+			if (serverConfig.connectionMode == ModpackConnectionMode.HTTP)
+				send(context, "Modpack hosting " + action + "!", ChatFormatting.GREEN, "HTTP contract over HTTPS on port " + serverConfig.bindPort, ChatFormatting.WHITE, true);
+			else send(context, "Modpack hosting " + action + "!", ChatFormatting.GREEN, true);
 		} else if (!serverConfig.modpackHost) {
 			send(context, "Built-in modpack hosting is disabled by modpackHost.", ChatFormatting.YELLOW, false);
-		} else if (serverConfig.connectionMode == ModpackConnectionMode.DIRECT && serverConfig.bindPort == -1) {
-			send(context, "DIRECT with bindPort -1 uses only the advertised external endpoint; no built-in listener was started.", ChatFormatting.YELLOW, false);
+		} else if (serverConfig.connectionMode == ModpackConnectionMode.HTTP && serverConfig.bindPort == -1) {
+			send(context, "HTTP with bindPort -1 is only advertised; the URL contract must be served externally over HTTPS.", ChatFormatting.YELLOW, false);
 		} else {
 			send(context, "Couldn't start server!", ChatFormatting.RED, true);
 		}
-	}
-
-	private static boolean connectionRuntimeChanged(Jsons.ServerConfigFieldsV3 previous, Jsons.ServerConfigFieldsV3 current) {
-		return previous.connectionMode != current.connectionMode || previous.bindPort != current.bindPort || previous.modpackHost != current.modpackHost
-				|| previous.disableInternalTLS != current.disableInternalTLS || previous.bandwidthLimit != current.bandwidthLimit
-				|| previous.updateIpsOnEveryStart != current.updateIpsOnEveryStart || !Objects.equals(previous.bindAddress, current.bindAddress);
 	}
 
 	private static int modpackHostAbout(CommandContext<CommandSourceStack> context) {
@@ -379,28 +500,295 @@ public class Commands {
 
 	private static int about(CommandContext<CommandSourceStack> context) {
 		send(context, "AutoModpack", ChatFormatting.GREEN, AM_VERSION, ChatFormatting.WHITE, false);
-		send(context, "/automodpack generate", ChatFormatting.YELLOW, false);
-		send(context, "/automodpack host start/stop/restart/connections/fingerprint/bootstrap", ChatFormatting.YELLOW, false);
+		send(context, "/automodpack generate [notes <text...>]", ChatFormatting.YELLOW, false);
+		send(context, "/automodpack generate preview [notes <text...>]", ChatFormatting.YELLOW, false);
+		send(context, "/automodpack generate if-content <content-token> [notes <text...>]", ChatFormatting.YELLOW, false);
+		send(context, "/automodpack generate revert <seq> confirm [notes <text...>]", ChatFormatting.YELLOW, false);
+		send(context, "/automodpack generate history/storage [collect confirm]/export-http [--all] <dir>", ChatFormatting.YELLOW, false);
+		send(context, "/automodpack host start/stop/restart/activity/fingerprint/bootstrap", ChatFormatting.YELLOW, false);
 		send(context, "/automodpack config reload", ChatFormatting.YELLOW, false);
+		send(context, "/automodpack groups [group-id]", ChatFormatting.YELLOW, false);
 		return Command.SINGLE_SUCCESS;
 	}
 
 	private static int generateModpack(CommandContext<CommandSourceStack> context) {
+		return runGeneration(context, false, false);
+	}
+
+	private static int previewModpack(CommandContext<CommandSourceStack> context) {
+		return runGeneration(context, true, false);
+	}
+
+	private static int guardedGenerateModpack(CommandContext<CommandSourceStack> context) {
+		return runGeneration(context, false, true);
+	}
+
+	private static int runGeneration(CommandContext<CommandSourceStack> context, boolean preview, boolean guarded) {
+		String notes = optionalArgument(context, "notes");
+		String expectedToken = guarded ? StringArgumentType.getString(context, "content-token") : null;
 		Util.backgroundExecutor().execute(() -> {
-			if (modpackExecutor.isGenerating()) {
-				send(context, "Modpack is already generating! Please wait!", ChatFormatting.RED, false);
+			send(context, preview ? "Preparing modpack preview..." : "Generating modpack...", ChatFormatting.YELLOW, !preview);
+			long start = System.currentTimeMillis();
+			if (preview) {
+				ModpackExecutor.PreviewResult result = modpackExecutor.preview(notes);
+				if (result instanceof ModpackExecutor.PreviewReady ready) {
+					headline(context, "PREVIEW READY", start, ready.state().contentToken(), ChatFormatting.GREEN, false);
+					reportGenerationDetails(context, ready.state(), true, false);
+					if (ready.state().parent().isEmpty())
+						send(context, "Guarded publication is unavailable until an unguarded root publication exists", ChatFormatting.YELLOW, false);
+				} else if (result instanceof ModpackExecutor.PreviewResult.Rejected rejected) {
+					send(context, "PREVIEW FAILED: " + rejected.detail(), ChatFormatting.RED, false);
+				}
 				return;
 			}
-			send(context, "Generating Modpack...", ChatFormatting.YELLOW, true);
-			long start = System.currentTimeMillis();
-			if (modpackExecutor.generateNew()) {
-				send(context, "Modpack generated! took " + (System.currentTimeMillis() - start) + "ms", ChatFormatting.GREEN, true);
-			} else {
-				send(context, "Modpack generation failed! Check logs for more info.", ChatFormatting.RED, true);
+
+			ModpackExecutor.PublishResult result = guarded ? modpackExecutor.publishIfContent(expectedToken, notes) : modpackExecutor.publish(notes);
+			if (result instanceof ModpackExecutor.Published published) {
+				headline(context, "PUBLISHED", start, published.state().contentToken(), ChatFormatting.GREEN, true);
+				reportGenerationDetails(context, published.state(), false, true);
+				published.warnings().forEach(warning -> send(context, "WARNING: " + warning, ChatFormatting.YELLOW, true));
+				reportHostingFailure(context, published.hostingFailure());
+			} else if (result instanceof ModpackExecutor.NoChanges noChanges) {
+				headline(context, "NO_CHANGES", start, noChanges.state().contentToken(), ChatFormatting.YELLOW, true);
+				reportGenerationDetails(context, noChanges.state(), false, true);
+				noChanges.warnings().forEach(warning -> send(context, "WARNING: " + warning, ChatFormatting.YELLOW, true));
+				reportHostingFailure(context, noChanges.hostingFailure());
+			} else if (result instanceof ModpackExecutor.PublishResult.Rejected rejected) {
+				send(context, "FAILED: " + rejected.detail(), ChatFormatting.RED, true);
 			}
 		});
-
 		return Command.SINGLE_SUCCESS;
+	}
+
+	/** The generation is committed, but the live host may still serve the previous view; only an explicit restart rebinds it. */
+	private static void reportHostingFailure(CommandContext<CommandSourceStack> context, Optional<Throwable> failure) {
+		failure.ifPresent(cause -> send(context, "HOSTING SWAP FAILED: " + Throwables.detail(cause)
+				+ ". The generation is committed; run /automodpack host restart to rebind hosting.",
+				ChatFormatting.RED, true));
+	}
+
+	/** The one-line outcome of a generation: status, elapsed time and the short content token that click-copies the full one. */
+	private static void headline(CommandContext<CommandSourceStack> context, String status, long start, String contentToken, ChatFormatting statusColor, boolean broadcast) {
+		send(context, status + elapsed(start), statusColor, VersionedText.literal("content token ").append(copyable(shortToken(contentToken), contentToken)),
+				ChatFormatting.WHITE, broadcast);
+	}
+
+	private static int previewRevertGeneration(CommandContext<CommandSourceStack> context) {
+		long targetSeq = parseSeq(context);
+		if (targetSeq < 1) return 0;
+		if (!resolveAndReportRevertTarget(context, targetSeq)) return 0;
+		send(context, "Confirmation required: /automodpack generate revert " + targetSeq + " confirm", ChatFormatting.YELLOW, false);
+		return Command.SINGLE_SUCCESS;
+	}
+
+	private static int revertGeneration(CommandContext<CommandSourceStack> context) {
+		long targetSeq = parseSeq(context);
+		if (targetSeq < 1) return 0;
+		String notes = optionalArgument(context, "notes");
+		if (!resolveAndReportRevertTarget(context, targetSeq)) return 0;
+		Util.backgroundExecutor().execute(() -> {
+			long start = System.currentTimeMillis();
+			send(context, "Reverting the modpack to #" + targetSeq + "...", ChatFormatting.YELLOW, true);
+			ModpackExecutor.RevertResult result = modpackExecutor.revert(targetSeq, notes);
+			if (result instanceof ModpackExecutor.Reverted reverted) {
+				send(context, "REVERTED to #" + reverted.targetSeq() + elapsed(start), ChatFormatting.GREEN,
+						VersionedText.literal("content token ").append(copyable(shortToken(reverted.current().contentToken()), reverted.current().contentToken())),
+						ChatFormatting.WHITE, true);
+				reverted.warnings().forEach(warning -> send(context, "WARNING: " + warning, ChatFormatting.YELLOW, true));
+				reportHostingFailure(context, reverted.hostingFailure());
+			} else if (result instanceof ModpackExecutor.RevertResult.Rejected rejected) {
+				send(context, "FAILED: " + rejected.detail(), ChatFormatting.RED, true);
+			}
+		});
+		return Command.SINGLE_SUCCESS;
+	}
+
+	/** The journal sequence argument; feedback for a malformed value is sent here and 0 is returned. */
+	private static long parseSeq(CommandContext<CommandSourceStack> context) {
+		String argument = StringArgumentType.getString(context, "seq");
+		try {
+			return Long.parseLong(argument);
+		} catch (NumberFormatException e) {
+			send(context, "Invalid journal sequence: " + argument, ChatFormatting.RED, true);
+			return -1;
+		}
+	}
+
+	/** The shared resolve-and-report prologue of the revert handlers; feedback is sent and false returned when the target is missing or the journal unreadable. */
+	private static boolean resolveAndReportRevertTarget(CommandContext<CommandSourceStack> context, long targetSeq) {
+		try {
+			List<JournalEntry> history = modpackExecutor.technicalHistory(HISTORY_TAIL_LIMIT);
+			JournalEntry target = findRevertTarget(history, targetSeq);
+			if (target == null) {
+				send(context, "FAILED: journal target was not found", ChatFormatting.RED, true);
+				return false;
+			}
+			reportRevertTarget(context, target, history);
+			return true;
+		} catch (IOException e) {
+			send(context, "FAILED: could not read the modpack journal: " + e.getMessage(), ChatFormatting.RED, true);
+			return false;
+		}
+	}
+
+	private static JournalEntry findRevertTarget(List<JournalEntry> history, long targetSeq) {
+		return history.stream().filter(entry -> entry.seq() == targetSeq).findFirst().orElse(null);
+	}
+
+	private static void reportRevertTarget(CommandContext<CommandSourceStack> context, JournalEntry target, List<JournalEntry> history) {
+		send(context, "Revert target", ChatFormatting.YELLOW, "#" + target.seq() + " " + target.createdAt(), ChatFormatting.WHITE, true);
+		send(context, "Target content", ChatFormatting.WHITE, copyable(target.contentToken()), ChatFormatting.YELLOW, false);
+		if (!target.notes().isBlank()) send(context, "Target patch notes: " + firstLine(target.notes()), ChatFormatting.GRAY, false);
+		if (!history.isEmpty() && history.get(history.size() - 1).seq() != target.seq()) {
+			JournalEntry.Summary netChanges = JournalEntry.changesSince(history, target);
+			send(context, "Changes from current: +" + netChanges.added() + " added, " + netChanges.changed() + " changed, " + netChanges.removed() + " removed",
+					ChatFormatting.YELLOW, false);
+		}
+	}
+
+	private static int exportHttpTree(CommandContext<CommandSourceStack> context) {
+		return exportHttpTree(context, false);
+	}
+
+	private static int exportHttpTreeAll(CommandContext<CommandSourceStack> context) {
+		return exportHttpTree(context, true);
+	}
+
+	private static int exportHttpTree(CommandContext<CommandSourceStack> context, boolean includeAll) {
+		String directory = StringArgumentType.getString(context, "directory");
+		Util.backgroundExecutor().execute(() -> {
+			send(context, "Exporting the HTTP contract tree...", ChatFormatting.YELLOW, true);
+			try {
+				ModpackExecutor.ExportHttpResult result = modpackExecutor.exportHttp(Path.of(directory), includeAll);
+				if (result instanceof ModpackExecutor.ExportHttpResult.Exported exported) {
+					send(context, exported.receipt(directory), ChatFormatting.GREEN, true);
+				} else if (result instanceof ModpackExecutor.ExportHttpResult.Rejected refused) {
+					send(context, "FAILED: " + refused.detail(), ChatFormatting.RED, true);
+				}
+			} catch (IOException e) {
+				send(context, "FAILED: could not export the HTTP contract tree: " + e.getMessage(), ChatFormatting.RED, true);
+			}
+		});
+		return Command.SINGLE_SUCCESS;
+	}
+
+	private static int generationHistory(CommandContext<CommandSourceStack> context) {
+		try {
+			List<JournalEntry> history = modpackExecutor.technicalHistory(HISTORY_TAIL_LIMIT);
+			if (history.isEmpty()) {
+				send(context, "No published modpack content.", ChatFormatting.YELLOW, false);
+				return Command.SINGLE_SUCCESS;
+			}
+			for (JournalEntry entry : history) {
+				send(context, "ENTRY " + entry.seq() + " " + entry.createdAt(), ChatFormatting.WHITE, false);
+				send(context, "Content token", ChatFormatting.WHITE, copyable(shortToken(entry.contentToken())), ChatFormatting.YELLOW, false);
+				JournalEntry.Summary summary = entry.summary();
+				send(context, "Changes", ChatFormatting.WHITE, "+" + summary.added() + " ~" + summary.changed() + " -" + summary.removed(), ChatFormatting.YELLOW, false);
+				if (entry.restoreOf() >= 0) send(context, "Restores", ChatFormatting.WHITE, "#" + entry.restoreOf(), ChatFormatting.YELLOW, false);
+				if (!entry.notes().isBlank()) send(context, "Patch notes: " + firstLine(entry.notes()), ChatFormatting.GRAY, false);
+			}
+			return Command.SINGLE_SUCCESS;
+		} catch (IOException e) {
+			send(context, "Failed to read the modpack journal: " + e.getMessage(), ChatFormatting.RED, false);
+			return 0;
+		}
+	}
+
+	private static int modpackGroups(CommandContext<CommandSourceStack> context) {
+		Util.backgroundExecutor().execute(() -> {
+			try {
+				Optional<PackDocument> published = modpackExecutor.currentDocument();
+				for (String line : GroupInspector.overview(serverConfig.modpack.categories, published.map(PackDocument::manifest).orElse(null)))
+					send(context, line, ChatFormatting.WHITE, false);
+			} catch (IOException e) {
+				send(context, "Failed to read the published modpack: " + e.getMessage(), ChatFormatting.RED, true);
+			}
+		});
+		return Command.SINGLE_SUCCESS;
+	}
+
+	private static int modpackGroupDetail(CommandContext<CommandSourceStack> context) {
+		String groupId = StringArgumentType.getString(context, "group-id");
+		Util.backgroundExecutor().execute(() -> {
+			try {
+				Optional<PackDocument> published = modpackExecutor.currentDocument();
+				Optional<List<String>> lines = GroupInspector.detail(serverConfig.modpack.categories, groupId, published.map(PackDocument::manifest).orElse(null));
+				if (lines.isEmpty()) {
+					send(context, "Unknown group id: " + groupId + ". Run /automodpack groups for the list.", ChatFormatting.RED, false);
+					return;
+				}
+				for (String line : lines.get()) send(context, line, ChatFormatting.WHITE, false);
+			} catch (IOException e) {
+				send(context, "Failed to read the published modpack: " + e.getMessage(), ChatFormatting.RED, true);
+			}
+		});
+		return Command.SINGLE_SUCCESS;
+	}
+
+	private static int generationStorage(CommandContext<CommandSourceStack> context) {
+			try {
+				GenerationStore.StorageReport report = modpackExecutor.storageReport();
+				send(context, "Modpack storage", ChatFormatting.GREEN, false);
+				send(context, "Journal", ChatFormatting.WHITE, report.journalEntries() + " entries, " + report.journalBytes() + " bytes", ChatFormatting.YELLOW, false);
+				send(context, "Objects", ChatFormatting.WHITE, report.objectCount() + " files, " + report.objectBytes() + " bytes", ChatFormatting.YELLOW, false);
+				return Command.SINGLE_SUCCESS;
+			} catch (IOException e) {
+				send(context, "Failed to measure modpack storage: " + e.getMessage(), ChatFormatting.RED, false);
+				return 0;
+			}
+		}
+
+		private static int generationStorageCollect(CommandContext<CommandSourceStack> context) {
+			try {
+				GenerationStore.CollectionSummary result = modpackExecutor.collectUnreachableObjects();
+				send(context, "Modpack objects collected", ChatFormatting.GREEN, false);
+				send(context, "Objects", ChatFormatting.WHITE, result.objectsBefore() + " -> " + (result.objectsBefore() - result.deletedObjects()), ChatFormatting.YELLOW, false);
+				send(context, "Bytes", ChatFormatting.WHITE, result.bytesBefore() + " -> " + (result.bytesBefore() - result.deletedBytes()), ChatFormatting.YELLOW, false);
+				send(context, "Deleted", ChatFormatting.WHITE, result.deletedObjects() + " objects, " + result.deletedBytes() + " bytes", ChatFormatting.YELLOW, false);
+			} catch (IOException e) {
+				send(context, "Failed to collect modpack objects: " + e.getMessage(), ChatFormatting.RED, false);
+			}
+			return Command.SINGLE_SUCCESS;
+		}
+
+		private static String optionalArgument(CommandContext<CommandSourceStack> context, String name) {
+		try {
+			return StringArgumentType.getString(context, name);
+		} catch (IllegalArgumentException e) {
+			return null;
+		}
+	}
+
+	private static String elapsed(long start) {
+		long ms = System.currentTimeMillis() - start;
+		return ms >= 1000 ? String.format(Locale.ROOT, " took %.1fs", ms / 1000.0) : " took " + ms + "ms";
+	}
+
+	/** Newest journal entries the operator-facing history command prints; the journal file itself is the authority beyond this window. */
+	private static final int HISTORY_TAIL_LIMIT = 100;
+
+	private static String shortToken(String contentToken) {
+		return contentToken.substring(0, Math.min(contentToken.length(), 7));
+	}
+
+	private static String firstLine(String notes) {
+		return notes.split("\\R", -1)[0];
+	}
+
+	/** The diff line always; the per-file and exclusion detail only on explicit inspection (preview), which stays sender-only. */
+	private static void reportGenerationDetails(CommandContext<CommandSourceStack> context, ModpackExecutor.CandidateState state, boolean detail, boolean broadcast) {
+		var diff = state.diff().summary();
+		StringBuilder diffLine = new StringBuilder(String.format(Locale.ROOT, "Diff: +%d ~%d -%d", diff.addedFiles(), diff.modifiedFiles(), diff.removedFiles()));
+		int exclusions = state.summary().exclusions();
+		if (exclusions > 0) diffLine.append(String.format(Locale.ROOT, " (%d excluded)", exclusions));
+		if (diff.metadataChanges() > 0) diffLine.append(String.format(Locale.ROOT, " (%d metadata)", diff.metadataChanges()));
+		send(context, diffLine.toString(), ChatFormatting.WHITE, broadcast);
+		if (!detail) return;
+		for (String change : state.diff().humanReadableChanges()) send(context, "Change: " + change, ChatFormatting.GRAY, false);
+		for (var exclusion : state.summary().excluded())
+			send(context, String.format(Locale.ROOT, "Excluded: %s/%s - %s (%s)", exclusion.source().groupId(), exclusion.source().logicalPath(),
+					exclusion.reason().name().toLowerCase(Locale.ROOT), exclusion.message()), ChatFormatting.GRAY, false);
+		state.patchNotesSource().ifPresent(source -> send(context, "Patch notes: " + source.name().toLowerCase(Locale.ROOT), ChatFormatting.WHITE, false));
 	}
 
 	private static void send(CommandContext<CommandSourceStack> context, String msg, ChatFormatting msgColor, boolean broadcast) {

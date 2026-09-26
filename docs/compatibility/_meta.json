@@ -1,14 +1,18 @@
 {
-  "launchers.mdx": {
-    "name": "Launchers compatibility",
+  "game-versions.mdx": {
+    "name": "Game versions",
     "icon": null
   },
-  "mods.mdx": {
-    "name": "Modifications compatibility",
+  "launchers.mdx": {
+    "name": "Launchers",
     "icon": null
   },
   "proxies.mdx": {
-    "name": "Proxies compatibility",
+    "name": "Proxies",
+    "icon": null
+  },
+  "mods.mdx": {
+    "name": "Mods",
     "icon": null
   }
 }

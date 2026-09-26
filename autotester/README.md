@@ -12,7 +12,7 @@ opt-in file bridge, and verifies that the modpack sync flow works end to end.
 - Built AutoModpack artifacts in `merged/`
 
 Build artifacts first from the repository root. Use `build` (which runs the jar
-merge as a finalizer) rather than `mergeJar` directly — `mergeJar` on its own
+merge as a finalizer) rather than `mergeJar` directly - `mergeJar` on its own
 does not rebuild the dependency modules. The `-Pautomodpack.autotest` flag bundles
 the in-game test instrumentation (`AutoTestBridge` + the `dev` mixins) into the
 jars; it is required for the autotester and is never included in release builds.
@@ -32,13 +32,13 @@ uv --project autotester run autotester build-images
 Run one target:
 
 ```bash
-uv --project autotester run autotester run --target 1.21.11-fabric --scenario download-only --jobs 3
+uv --project autotester run autotester run --target 1.21.11-fabric --scenario download-only
 ```
 
 Run the full default matrix:
 
 ```bash
-uv --project autotester run autotester run --target all --scenario sync --jobs 3
+uv --project autotester run autotester run --target all --scenario all
 ```
 
 Clean generated output:
@@ -49,15 +49,17 @@ uv --project autotester run autotester clean
 
 ## What It Tests
 
-The default `sync` scenario performs this flow:
+The default `all` scenario performs one release-confidence flow:
 
-1. Start a server container.
-2. Start a client container.
-3. Connect to the server.
-4. Accept the server certificate fingerprint.
-5. Download and verify synced files.
-6. Restart the client.
-7. Rejoin and verify the player reaches the game.
+1. Start a server and client container and trust the certificate.
+2. Import and delete `automodpack/automodpack-bootstrap.json`, seed TLS trust, and prove that secure mode rejects anonymous pre-login catalogue access.
+3. Complete authenticated login, verify the issued secret is persisted by both client and server, then download and restart the pack.
+4. Relaunch with the saved secret and verify the complete catalogue preloads before reconnecting.
+5. Review advanced groups, including categories, dependencies, conflicts, defaults, and platform filtering.
+6. Cache a second installed record and switch A to B to A through the pack manager's review/accept flow.
+7. Publish a real second server generation, review its changed/removed files and patch notes, and verify final contents.
+
+`sync` and the other focused scenarios remain available for faster diagnosis.
 
 The `download-only` scenario stops after the first sync and file verification.
 Use it for faster debugging when restart/rejoin behavior is not relevant.
@@ -101,7 +103,7 @@ with `uv --project autotester run autotester build-images`.
 Scenarios are **declarative**: a `flow` is an ordered list of *steps*, where each
 step is a verb plus arguments. Verbs are generic building blocks (click a button,
 type into a field, wait for a condition, verify files), so most tests need no
-Python — behavior is expressed entirely in YAML.
+Python - behavior is expressed entirely in YAML.
 
 ```yaml
 id: download-only
@@ -132,26 +134,28 @@ A step is either a bare name (`- quit`, or a macro name) or a mapping with a
 | Key | Meaning |
 | --- | --- |
 | `name` | Human-readable label shown in logs and `results.json`. |
-| `when` | A condition; the step runs only if it holds. |
-| `repeat` | Run the step N times. |
+| `when` | A condition; the step runs only if it holds. With `repeat`, it is re-checked before every iteration and stops the loop once it no longer holds. |
+| `repeat` | Run the step at most N times; combined with `when` it becomes "do while the condition holds". |
 | `optional` | If the step fails, log it and continue instead of failing the run. |
 
 ### Networking, modes, and scoping
 
-Three scenario-header keys decouple *how* a scenario runs from *what* it tests:
+Scenario-header keys decouple *how* a scenario runs from *what* it tests:
 
 | Key | Values | Meaning |
 | --- | --- | --- |
-| `network` | `bridge` (default) / `host` | Container transport. `bridge` wires a per-run user network (CI). `host` puts both containers in the host network namespace (the client reaches the server on `localhost`) — the only topology a host-network-only sandbox allows. Run host transport with `--jobs 1`: host-mode servers all bind `25565` and would collide. Also settable globally via `network:` in `settings.yaml`. |
-| `mode` | `full` (default) / `client-only` | `full` launches a server + client. `client-only` launches **only** the client against a pre-staged modpack — no server, no certificate/download/restart dance. |
+| `network` | `bridge` (default) / `host` | Container transport. `bridge` wires a per-run user network (CI). `host` puts both containers in the host network namespace (the client reaches the server on `localhost`) - the only topology a host-network-only sandbox allows. Run host transport with `--jobs 1`: host-mode servers all bind `25565` and would collide. Also settable globally via `network:` in `settings.yaml`. |
+| `mode` | `full` (default) / `client-only` | `full` launches a server + client. `client-only` launches **only** the client against a pre-staged generation - no server, no certificate/download/restart dance. |
 | `targets` / `loaders` / `minecraft` | list (globs where noted) | Scope the scenario to compatible targets. A target must pass every key present: `targets` (glob on id), `loaders` (exact), `minecraft` (glob). Out-of-scope targets are skipped with a `SKIP` line instead of failing on missing mods. |
+| `renderClient` | boolean | Run Minecraft in Xvfb with Mesa software rendering at the 320x240 logical minimum. Set this to `true` for `screenshot` steps; ordinary scenarios keep the faster HeadlessMC renderer stub. |
 
 #### Client-only (offline / pre-staged) mode
 
-`mode: client-only` is the fast loader-debugging path: stage a modpack, boot just
-the client, and assert on the launch log — seconds per iteration instead of a
-multi-minute gameplay round trip. The `stage_modpack` verb lays the modpack into
-`automodpack/modpacks/<modpackId>/` and writes a client config that selects it with
+`mode: client-only` is the fast loader-debugging path: stage a generation, boot
+just the client, and assert on the launch log - seconds per iteration instead of
+a multi-minute gameplay round trip. The `stage_modpack` verb writes the fixed
+`automodpack/client/active/` projection, its immutable generation
+record, CAS objects, active state, and a client config with
 `updateSelectedModpackOnLaunch=false`, so the client loads it on boot without
 contacting a server:
 
@@ -170,11 +174,14 @@ flow:
   - use: finish_client_only       # best-effort quit; cleanup handles a crashed client
 ```
 
-`stage_modpack` accepts `from:` (a ready modpack dir to copy wholesale), `mods:`
+`stage_modpack` accepts `from:` (a ready directory to copy wholesale), `mods:`
 (extra jars to drop into the pack's `mods/`), and `config:` (extra client-config
-overrides). **`from:` and `mods:` paths resolve against the repo root** (the
-parent of `autotester/`) unless absolute. `manifest: true` derives a local
-`automodpack-content.json` from the final staged files for reconciliation tests.
+overrides). Set `recordOnly: true` with a stable `packId`/`packName` to add a
+complete cached generation record without changing the active projection.
+**`from:` and `mods:` paths resolve against the repo root** (the
+parent of `autotester/`) unless absolute. The staged generation is always
+derived from the final files, so its identity and ownership ledger match the
+active projection used by the client.
 Whole-log assertions followed by `finish_client_only` make "verify it loaded, then
 stop immediately" robust on both headless and GPU hosts. See
 `scenarios/client-loads-offline.yaml`.
@@ -184,12 +191,12 @@ stop immediately" robust on both headless and GPU hosts. See
 ```bash
 autotester verbs                       # list verbs + condition keys (from the registry)
 autotester validate                    # statically check every scenario
-autotester validate --scenario sync    # check one
-autotester targets --scenario sync     # print the in-scope target IDs as JSON
+autotester validate --scenario all     # check the release gate
+autotester targets --scenario all      # print the in-scope target IDs as JSON
 ```
 
 `validate` expands macros and checks that every verb/macro name resolves and
-every condition uses known keys — catching typos in seconds instead of after
+every condition uses known keys - catching typos in seconds instead of after
 minutes in Docker. `run` performs the same check before launching containers and
 aborts on a malformed scenario.
 
@@ -199,12 +206,12 @@ aborts on a malformed scenario.
 | --- | --- |
 | `click` | Click the element matched by `select:` (defaults to enabled elements). Set `enable: true` to force-enable it first. |
 | `type` / `paste` | Type `value:` into the field matched by `select:` (defaults to the first text field). |
+| `screenshot` | Save the real rendered Minecraft framebuffer under the case's `client/game/automodpack/autotest/screenshots/` directory. Set `renderClient: true` on the scenario and use `file:` to choose the PNG name. |
 | `wait_for` | Poll `until:` (a condition) until it holds or `timeout:` elapses. |
 | `assert` | Fail immediately unless `that:` (a condition) holds. |
 | `sleep` | Wait `duration:` (e.g. `2s`). |
-| `wait_file` / `wait_files` | Wait for file(s) under the client game dir. |
+| `wait_file` | Wait for a file under the client game dir. |
 | `verify_files` | Wait until every `serverFiles.files` entry exists in the synced modpack. |
-| `verify_mods` | Wait until every `serverFiles.expectedMods` glob is present. |
 | `launch_server` / `wait_server` | Start the server / wait for `Done (`. |
 | `launch_client` / `wait_bridge` | Start a client / wait for its bridge. |
 | `stage_modpack` | Pre-stage a modpack into the client game dir for offline/client-only runs (see below). |
@@ -213,7 +220,7 @@ aborts on a malformed scenario.
 | `wait_join` | Wait until the player is in-game (no screen open). |
 
 Run `autotester verbs` to print this list (with one-line docs) and the valid
-condition keys, generated straight from the registry — no need to grep `@verb(`.
+condition keys, generated straight from the registry - no need to grep `@verb(`.
 
 ### Selectors
 
@@ -222,12 +229,20 @@ condition keys, generated straight from the registry — no need to grep `@verb(
 ```yaml
 select:
   role: button        # button | textfield | any (default)
+  key: automodpack.cancel  # translation key (preferred: survives copy edits)
+  key_any: [automodpack.selection.button, automodpack.selection.shortButton]
   text: Verify        # exact match preferred, else substring (case-insensitive)
   text_any: [ok, yes] # any of these
   class: Btn          # substring of the element's class
-  enabled: true       # filter by enabled / visible
+  enabled: true       # filter by enabled
+  visible: true       # default true; hidden widgets (plain-text placeholders) never match
   index: -1           # pick the Nth match (negative counts from the end)
 ```
+
+Prefer `key:` for chrome that comes from `en_us.json` (`Continue`, `Update`, `Back`). Keep `text:`
+for fixture data and glyph state (`[x] Visuals`, pack names). The bridge dumps only widgets
+attached through `Screen.children()` so a focused button leftover from `rebuildWidgets` cannot
+satisfy `element` / `no_element`.
 
 ### Conditions
 
@@ -240,7 +255,7 @@ condition must hold (AND):
 | `screen_none` | No screen is open (the player is in-game). |
 | `element` / `no_element` | A selector matches at least one / no elements. |
 | `file` / `file_gone` | A path under the game dir exists / does not exist. |
-| `log` | A regex matches a log source — container stdout or a game-dir file (see below). |
+| `log` | A regex matches a log source - container stdout or a game-dir file (see below). |
 | `all` / `any` / `not` | Combine sub-conditions. |
 
 #### The `log` condition
@@ -325,7 +340,9 @@ Important files:
 - `results.json`: aggregated pass/fail result.
 - `<case>/amp-s-*.log`: server container log.
 - `<case>/amp-c-*.log`: client container log.
-- `<case>/client/game/automodpack/modpacks/`: synced client modpacks.
+- `<case>/client/game/automodpack/client/active/`: current client projection.
+- `<case>/client/game/automodpack/client/records/`: immutable generation records.
+- `<case>/client/game/automodpack/autotest/screenshots/`: screenshots captured by `do: screenshot` steps.
 
 `results.json` has this shape:
 
@@ -335,7 +352,7 @@ Important files:
   "results": [
     {
       "target": "1.21.11-fabric",
-      "scenario": "sync",
+      "scenario": "all",
       "ok": false,
       "duration": 142.7,
       "error": "step 'confirm download' failed: ...",
@@ -351,6 +368,24 @@ Important files:
 Each step records its `name`, `verb`, `ok`, and `duration`; failed steps also
 carry an `error`. On failure the partial step list up to and including the failing
 step is preserved.
+
+## Concurrent Runs
+
+Two autotesters can safely run at the same time as long as they run from
+different checkouts (or use distinct `--out-dir` values):
+
+- The server cache volume is named per checkout (`amp-server-cache-<checkout>-<target>`),
+  so two checkouts never share world data. Within one checkout, runs touching the
+  same target serialize on a lock file instead of racing (`[wait] ... server cache
+  is in use by another run`).
+- `clean` only deletes this checkout's output and reaps this run's orphaned docker
+  resources. It does **not** stop Gradle daemons unless `--stop-daemons` is passed:
+  `gradle --stop` kills daemons for every project of the Gradle user home, including
+  builds another checkout is running.
+
+Running two sessions from the *same* checkout is still unsafe outside the volume
+lock: `gradlew build` shares one build tree, and `git checkout`/`clean` while
+another run deploys jars will break it. Use a separate worktree per session.
 
 ## CI Workflow
 

@@ -6,6 +6,7 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 /*import net.minecraft.client.gui.GuiGraphics;
 *//*?} else {*/
 /*import com.mojang.blaze3d.vertex.PoseStack;
+import net.minecraft.client.gui.GuiComponent;
 *//*?}*/
 
 public class VersionedMatrices  /*? if <1.20 {*/ /*extends PoseStack *//*?}*/   {
@@ -36,6 +37,15 @@ public class VersionedMatrices  /*? if <1.20 {*/ /*extends PoseStack *//*?}*/   
 	}
 	*//*?}*/
 
+	/** Fills a gui-coordinate rectangle with a solid color. */
+	public void fill(int x0, int y0, int x1, int y1, int color) {
+		/*? if <1.20 {*/
+		/*GuiComponent.fill(getContext(), x0, y0, x1, y1, color);
+		*//*?} else {*/
+		getContext().fill(x0, y0, x1, y1, color);
+		/*?}*/
+	}
+
 /*? if >=1.20 {*/
 	/*? if >=1.21.6 {*/
 	public void pushPose() {
@@ -63,4 +73,5 @@ public class VersionedMatrices  /*? if <1.20 {*/ /*extends PoseStack *//*?}*/   
 	}
 	*//*?}*/
 /*?}*/
+
 }

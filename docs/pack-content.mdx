@@ -1,0 +1,126 @@
+# Building the modpack
+
+The server builds a candidate generation from two sources. Both map onto the client's game directory, laid out like a `.minecraft` folder.
+
+- The group directory `automodpack/host-modpack/<group>/` is included in full unless `exclude`d. Files go here when the server itself has no use for them, for example client-side mods or when clear separation is needed.
+- The group's `from-server` rules pull files out of the server root. This is how the pack picks up the mods, configs, and scripts that already live on the server.
+
+The default group id is `main`. After changing files or rules, publish a new generation with `/automodpack generate`; clients pick it up on their next connection. Publishing is described in [generations](how-it-works/generations).
+
+## Example
+
+A server with this layout:
+
+```
+├── automodpack
+│   ├── server.conf
+│   └── host-modpack
+│       └── main
+│           ├── config
+│           │   ├── my-super.conf
+│           │   └── shadow.txt
+│           ├── mods
+│           │   ├── fabric-api.jar
+│           │   └── herobrine-mod.jar
+│           ├── options.txt
+│           └── shaderpacks
+│               └── the-ultimate-shader.zip
+├── config
+│   ├── ferritecore.mixin.properties
+│   └── invisible-radio.json
+├── kubejs
+│   ├── client_scripts
+│   │   └── welcome.js
+│   ├── common_scripts
+│   │   └── recipes.js
+│   └── server_scripts
+│       └── datapack_loader.js
+└── mods
+    ├── automodpack.jar
+    ├── fabric-api.jar
+    ├── ferritecore.jar
+    ├── modmenu.jar
+    └── sodium-fabric.jar
+```
+
+and this group declared in `server.conf`:
+
+```
+modpack {
+  name: ""
+  General {
+    main {
+      from-server: [mods/*.jar, kubejs/**, emotes/*]
+      exclude: [kubejs/server_scripts/**]
+      editable: [options.txt, config/**]
+    }
+  }
+}
+```
+
+produces this pack for clients:
+
+```
+├── config
+│   ├── my-super.conf      (editable)
+│   └── shadow.txt         (editable)
+├── kubejs
+│   ├── client_scripts
+│   │   └── welcome.js
+│   └── common_scripts
+│       └── recipes.js
+├── mods
+│   ├── fabric-api.jar     (the host-modpack copy)
+│   ├── ferritecore.jar
+│   ├── herobrine-mod.jar  (from host-modpack)
+│   ├── modmenu.jar
+│   └── sodium-fabric.jar
+├── options.txt            (editable)
+└── shaderpacks
+    └── the-ultimate-shader.zip
+```
+
+What the example shows:
+
+- `mods/*.jar` matches every jar in the server's `mods` folder. The AutoModpack jar itself stays out: clients update it through Modrinth to match the version the server runs, never through the pack. See [AutoModpack's own updates](how-it-works/client-updates#automodpacks-own-updates).
+- Both sources contained `mods/fabric-api.jar` with different versions, and the host-modpack copy won. When the same path exists in both sources, the group directory decides.
+- `kubejs/server_scripts/**` is excluded, so the server's scripts stay on the server.
+- `options.txt` and everything under `config` in the pack is editable because `editable` says so.
+- `config/ferritecore.mixin.properties` and `config/invisible-radio.json` exist on the server but not in the pack. `editable` marks files that are already in the pack; it does not pull files in.
+
+Editable files keep their copy in the game directory, mods included: a mod matched by `editable`, say `mods/customizable.jar`, materializes in the player's `mods` folder where they can edit or remove it. Mark a mod editable when players are expected to replace it themselves; leave it out and it stays in the projection, untouched.
+
+## Which files reach clients?
+
+A file reaches clients when one of the two sources provides it: the group directory includes everything it holds, and `from-server` pulls matching files from the server root. AutoModpack does not care what a file is; the same rules move mods, configs, and everything else.
+
+- Keep a server file off clients: add its path to `exclude`. A server-side mod, for example, is kept off with `mods/the-server-mod.jar`. Mods whose metadata already declares them server-side are left out by `autoExcludeServerSideMods` without any rule.
+- Give clients a file the server does not need: put it in the group directory, for example `automodpack/host-modpack/main/mods/`.
+- Split fully: remove the mod rules from `from-server` and put every client mod into the group directory. The pack's mods then come only from `host-modpack`, and the server's `mods` folder stays server-only.
+
+A `!` rule inside `from-server` also skips a path, but only for the server root; the group directory can still provide the file.
+
+## File rules
+
+`from-server`, `exclude`, and `editable` live on each group and are documented with the [group settings](configuration/server-config#groups). All three lists speak the same glob language, described in [globbing](configuration/server-config#globbing-wildcards).
+
+One rule worth knowing early: the group directory is included in full, so `exclude` is the only way to keep a file there from reaching clients. Inside `from-server`, a `!` rule skips a path only for that list; the group directory may still provide it.
+
+## Deleting content
+
+Remove the file from the server, or keep it on the server and add it to `exclude`. On the next update, clients delete their copy. Updates replace files by the same rule: a file that changed on the server is replaced by the pack's new bytes, and the old copy is not kept in the game folder. The full rules are in [client updates](how-it-works/client-updates#deletions-are-measured).
+
+## What never ships
+
+- AutoModpack's own jar. `/automodpack generate` never packs it and never publishes its updates: clients follow the AutoModpack version the server runs and pick the matching release up from Modrinth. To update players, update the jar on the server, restart, and clients sync to it on their next connection. The details, including `sync-automodpack-version` and `self-updater`, are in [AutoModpack's own updates](how-it-works/client-updates#automodpacks-own-updates).
+- Mods whose metadata declares them server-side, when `auto-exclude-server-side-mods` is on (default).
+- Empty, hidden, `.tmp`, `.disabled`, and `.bak` files. The default `exclude` rules carry these patterns and can be edited; the `automodpack/` namespace and Windows-reserved device names are always left out and cannot be turned back on.
+- The paths `saves/`, `screenshots/`, `logs/`, and `automodpack/` can never be claimed by the pack.
+
+## Groups
+
+Groups split a modpack into parts. `main` is by default the required core; extra groups become optional entries that players pick in the in-game "Group Selection" screen, and the choice sticks across updates. Every group is declared under a category, whose name is the section header the group is listed under. A shader bundle or a platform-specific mod set is a typical use.
+
+The [group settings](configuration/server-config#groups) document every field: display metadata, `required`, `default-selected`, `requires` and `breaks-with` relations, and `compatible-platforms`.
+
+Different content under one path is allowed only between groups that can never be selected together, meaning groups that `breaks-with` each other or groups limited to different `compatible-platforms`. That is how you ship variants, for example a Windows-only file alongside a generic one. When two groups that could be selected together disagree about a path, `/automodpack generate` fails with an error naming the path and both groups, and nothing is published until you separate the paths or make the groups mutually exclusive.

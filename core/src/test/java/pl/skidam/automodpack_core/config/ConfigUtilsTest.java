@@ -1,6 +1,7 @@
 package pl.skidam.automodpack_core.config;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -9,61 +10,66 @@ import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 
-import pl.skidam.automodpack_core.Constants;
-import pl.skidam.automodpack_core.protocol.ModpackConnectionMode;
-
 class ConfigUtilsTest {
 	@Test
 	void preservesPathRuleOrder() {
-		Jsons.ServerConfigFieldsV3 config = new Jsons.ServerConfigFieldsV3();
-		Jsons.GroupDeclaration group = new Jsons.GroupDeclaration();
-		group.syncedFiles = new LinkedHashSet<>(List.of("/third", "/first", "/second"));
-		group.allowEditsInFiles = new LinkedHashSet<>(List.of("third", "first", "second"));
-		group.overwriteEditableFiles = new LinkedHashSet<>(List.of("third", "first", "second"));
-		group.forceCopyFilesToStandardLocation = new LinkedHashSet<>(List.of("third", "first", "second"));
-		config.groups = new LinkedHashMap<>(Map.of("main", group));
+		ServerConfigJsons.ServerConfigFieldsV3 config = new ServerConfigJsons.ServerConfigFieldsV3();
+		ServerConfigJsons.GroupDeclaration group = new ServerConfigJsons.GroupDeclaration();
+		group.fromServer = new LinkedHashSet<>(List.of("third", "first", "second"));
+		group.editable = new LinkedHashSet<>(List.of("third", "first", "second"));
+		config.modpack.categories = Map.of("General", new LinkedHashMap<>(Map.of("main", group)));
 
 		ConfigUtils.normalizeServerConfig(config);
 
-		assertEquals(List.of("/third", "/first", "/second"), List.copyOf(group.syncedFiles));
-		assertEquals(List.of("/third", "/first", "/second"), List.copyOf(group.allowEditsInFiles));
-		assertEquals(List.of("/third", "/first", "/second"), List.copyOf(group.overwriteEditableFiles));
-		assertEquals(List.of("/third", "/first", "/second"), List.copyOf(group.forceCopyFilesToStandardLocation));
+		assertEquals(List.of("third", "first", "second"), List.copyOf(group.fromServer));
+		assertEquals(List.of("third", "first", "second"), List.copyOf(group.editable));
 	}
 
 	@Test
-	void holepunchAvailabilityStartsAt1201OnFabric() {
-		String previousVersion = Constants.MC_VERSION;
-		String previousLoader = Constants.LOADER;
-		try {
-			Jsons.ServerConfigFieldsV3 config = new Jsons.ServerConfigFieldsV3();
-			config.bindPort = 24444;
+	void normalizesRulePathsAndKeepsSetLocalNegations() {
+		ServerConfigJsons.ServerConfigFieldsV3 config = new ServerConfigJsons.ServerConfigFieldsV3();
+		ServerConfigJsons.GroupDeclaration group = new ServerConfigJsons.GroupDeclaration();
+		group.fromServer = new LinkedHashSet<>(List.of("/mods/*.jar", "/automodpack/host-modpack/main/extra", "!kubejs/server_scripts/**", "!/kubejs/assets/**"));
+		group.exclude = new LinkedHashSet<>(List.of("/automodpack/host-modpack/main/secret.bin", "!/automodpack/host-modpack/main/keep.bin"));
+		group.editable = new LinkedHashSet<>(List.of("//config/**"));
+		config.modpack.categories = Map.of("General", new LinkedHashMap<>(Map.of("main", group)));
 
-			Constants.MC_VERSION = "1.20.1";
-			Constants.LOADER = "fabric";
+		ConfigUtils.normalizeServerConfig(config);
 
-			config.connectionMode = ModpackConnectionMode.HOLEPUNCH;
-			ConfigUtils.normalizeServerConfig(config);
-			assertEquals(config.connectionMode, ModpackConnectionMode.HOLEPUNCH);
-			assertEquals(24444, config.bindPort);
+		assertEquals(List.of("mods/*.jar", "!kubejs/server_scripts/**", "!kubejs/assets/**"), List.copyOf(group.fromServer));
+		assertEquals(List.of("secret.bin", "!keep.bin"), List.copyOf(group.exclude));
+		assertEquals(List.of("config/**"), List.copyOf(group.editable));
+	}
 
-			Constants.LOADER = "forge";
+	@Test
+	void hostModpackRulesStripOnlyTheirOwnGroupPrefix() {
+		ServerConfigJsons.ServerConfigFieldsV3 config = new ServerConfigJsons.ServerConfigFieldsV3();
+		ServerConfigJsons.GroupDeclaration group = new ServerConfigJsons.GroupDeclaration();
+		group.fromServer = new LinkedHashSet<>(List.of("automodpack/host-modpack/main/extra", "!automodpack/host-modpack/main/skip/**"));
+		group.exclude = new LinkedHashSet<>(
+				List.of("automodpack/host-modpack/main/**", "automodpack/host-modpack/other/**", "/automodpack/host-modpack/main", "automodpack/host-modpack/main/**/**", "automodpack/host-modpack/main/**/*"));
+		config.modpack.categories = Map.of("General", new LinkedHashMap<>(Map.of("main", group)));
 
-			config.connectionMode = ModpackConnectionMode.HOLEPUNCH;
-			ConfigUtils.normalizeServerConfig(config);
-			assertEquals(config.connectionMode, ModpackConnectionMode.MAGIC_PACKET);
-			assertEquals(24444, config.bindPort);
+		ConfigUtils.normalizeServerConfig(config);
 
-			Constants.MC_VERSION = "1.19.2";
-			Constants.LOADER = "fabric";
+		// Own-group synced rules are dropped entirely: the group directory is included in full, so they are redundant.
+		assertEquals(List.of(), List.copyOf(group.fromServer));
+		// Whole-directory remainders (empty, `**`, `**/*`, collapsed `**/**`) are dropped: exclude also matches synced paths.
+		// A foreign group's rule is kept verbatim instead of being rewritten into this group's space.
+		assertEquals(List.of("automodpack/host-modpack/other/**"), List.copyOf(group.exclude));
+	}
 
-			config.connectionMode = ModpackConnectionMode.HOLEPUNCH;
-			ConfigUtils.normalizeServerConfig(config);
-			assertEquals(config.connectionMode, ModpackConnectionMode.MAGIC_PACKET);
-			assertEquals(24444, config.bindPort);
-		} finally {
-			Constants.MC_VERSION = previousVersion;
-			Constants.LOADER = previousLoader;
-		}
+	@Test
+	void nullGroupAndCategoryDeclarationsAreInvalid() {
+		ServerConfigJsons.ServerConfigFieldsV3 nullCategory = new ServerConfigJsons.ServerConfigFieldsV3();
+		nullCategory.modpack.categories = new LinkedHashMap<>(Map.of("General", new LinkedHashMap<>(Map.of("main", new ServerConfigJsons.GroupDeclaration()))));
+		nullCategory.modpack.categories.put("Broken", null);
+		assertThrows(ConfigTools.ConfigParseException.class, () -> ConfigUtils.normalizeServerConfig(nullCategory));
+
+		ServerConfigJsons.ServerConfigFieldsV3 nullGroup = new ServerConfigJsons.ServerConfigFieldsV3();
+		Map<String, ServerConfigJsons.GroupDeclaration> groups = new LinkedHashMap<>();
+		groups.put("main", null);
+		nullGroup.modpack.categories = new LinkedHashMap<>(Map.of("General", groups));
+		assertThrows(ConfigTools.ConfigParseException.class, () -> ConfigUtils.normalizeServerConfig(nullGroup));
 	}
 }

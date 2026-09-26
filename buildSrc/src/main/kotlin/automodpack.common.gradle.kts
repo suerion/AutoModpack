@@ -1,16 +1,26 @@
+import dev.luna5ama.jaroptimizer.OptimizeJarTask
+import org.gradle.api.plugins.BasePluginExtension
 import org.gradle.api.tasks.SourceSetContainer
-import java.math.BigInteger
-import java.security.MessageDigest
+import org.gradle.api.tasks.compile.JavaCompile
+import org.gradle.jvm.tasks.Jar
 
 plugins {
 	idea
 	id("dev.luna5ama.jar-optimizer")
 }
 
+val automodpackBuildMode =
+	providers
+		.gradleProperty("automodpack.autotest")
+		.map { "autotest" }
+		.orElse("release")
+val isAutotestBuild = automodpackBuildMode.get() == "autotest"
+
 // Test-only instrumentation (AutoTestBridge + its dev mixins) must never ship in
-// release jars. Exclude it from the source set for non-autotest builds and strip
-// the dev mixins from the config so Mixin doesn't look for the absent classes.
-if (!project.hasProperty("automodpack.autotest")) {
+// release jars. Exclude it from the source set for non-autotest builds, exclude
+// stale compiled outputs from release archives, and strip the dev mixins from the
+// config so Mixin doesn't look for the absent classes.
+if (!isAutotestBuild) {
 	plugins.withId("java") {
 		the<SourceSetContainer>().named("main").configure {
 			java.exclude(
@@ -19,7 +29,34 @@ if (!project.hasProperty("automodpack.autotest")) {
 			)
 		}
 	}
-	tasks.named("processResources").configure {
+}
+
+// The source-set exclusion above changes the effective inputs of these tasks, but
+// the build mode itself must also be an input. Otherwise Gradle can reuse a task
+// result from the other mode, especially when a target is built through Stonecutter.
+tasks.withType<JavaCompile>().configureEach {
+	inputs.property("automodpackBuildMode", automodpackBuildMode)
+}
+
+tasks.withType<Jar>().configureEach {
+	inputs.property("automodpackBuildMode", automodpackBuildMode)
+	if (!isAutotestBuild) {
+		exclude(
+			"pl/skidam/automodpack/client/autotest/**",
+			"pl/skidam/automodpack/mixin/dev/**",
+		)
+	}
+}
+
+tasks.configureEach {
+	if (name == "remapJar" || name == "shadowJar") {
+		inputs.property("automodpackBuildMode", automodpackBuildMode)
+	}
+}
+
+tasks.named("processResources").configure {
+	inputs.property("automodpackBuildMode", automodpackBuildMode)
+	if (!isAutotestBuild) {
 		doLast {
 			val cfg =
 				layout.buildDirectory
@@ -45,127 +82,39 @@ repositories {
 }
 
 tasks.named("build") {
-	val taksToRun = mutableListOf<String>()
-	for (module in getAllDependentLoaderModules(project.name)) {
-		taksToRun.add(":$module:build")
-	}
-	dependsOn(taksToRun)
-	if (project.hasProperty("automodpack.autotest")) {
+	if (isAutotestBuild) {
 		dependsOn(":autotest-fixtures:build")
 	}
-	finalizedBy(tasks.named("mergeJar"))
+	finalizedBy(tasks.named("optimizeModJar"))
 }
 
-val mergedDirPath = rootProject.projectDir.absolutePath + "/merged"
+val libsDirectory = layout.buildDirectory.dir("libs")
+val optimizedLibsDirectory = layout.buildDirectory.dir("libs-optimized")
 
-tasks.named("clean") {
-	finalizedBy("cleanMerged")
-}
-
-tasks.register("cleanMerged") {
-	val mergedDir = mergedDirPath
-	doLast {
-		File(mergedDir).deleteRecursively()
-	}
-}
-
-val mergeJarTask =
-	tasks.register<MergeJarTask>("mergeJar") {
-		this.mergedDirPath.set(project.rootProject.projectDir.absolutePath + "/merged")
-		this.rootProjectPath.set(project.rootProject.projectDir.absolutePath)
-		this.loaderModuleName.set(getLoaderModuleName(project.name))
-		this.buildDirectory.set(layout.buildDirectory)
-		this.outputJar.set(layout.buildDirectory.file("merged-jar-path.txt"))
-
-		// Hash the shadow jars where they exist: they're what this task actually merges and
-		// the only outputs that change when a shared subproject (core, loader-core, an
-		// earlyservices module) changes. The plain `jar` outputs don't contain those classes.
-		val filesToHash = mutableListOf<Any>()
-		(tasks.findByName("shadowJar") ?: tasks.findByName("jar"))?.let { projectJar ->
-			dependsOn(projectJar)
-			filesToHash.add(projectJar)
-		}
-		for (module in getAllDependentLoaderModules(project.name)) {
-			val moduleTasks = rootProject.project(module).tasks
-			(moduleTasks.findByName("shadowJar") ?: moduleTasks.findByName("jar"))?.let { modLoaderJar ->
-				filesToHash.add(modLoaderJar)
-			}
-		}
-
-		// Compute the actual hash of the content of all input jars.
-		// We use a provider so this is calculated just before task execution, ensuring files exist.
-		this.inputHash.set(
-			provider {
-				val outputFile = File(mergedDirPath.get(), getMergedJarPath(buildDirectory.get().dir("libs").asFile).name)
-				if (!outputFile.exists()) { // Return a random hash if the output file doesn't exist yet. We need to have something.
-					return@provider BigInteger(1, MessageDigest.getInstance("MD5").digest(System.currentTimeMillis().toString().toByteArray())).toString(16)
-				}
-				val filesToHash = files(filesToHash)
-				val digest = MessageDigest.getInstance("MD5") // Using MD5 just for speed
-
-				filesToHash.files.sortedBy { it.name }.forEach { file ->
-					if (file.exists()) {
-						file.inputStream().use { input ->
-							val buffer = ByteArray(8192)
-							var bytesRead = input.read(buffer)
-							while (bytesRead != -1) {
-								digest.update(buffer, 0, bytesRead)
-								bytesRead = input.read(buffer)
-							}
-						}
-					}
-				}
-				BigInteger(1, digest.digest()).toString(16)
+// A per-target build ends at the optimized impl jar; assembling the one jar out of every target's
+// output is the root project's oneJar task, and merged/ is that one jar's output directory only.
+val modJarFileName =
+	extensions
+		.getByType(BasePluginExtension::class.java)
+		.archivesName
+		.zip(providers.provider { version.toString() }) { name, v -> "$name-$v.jar" }
+val optimizeModJar =
+	tasks.register<OptimizeJarTask>("optimizeModJar") {
+		// Resolved when the task joins the graph, after every plugin has applied. The chain's last
+		// writer of the jar differs per loader: reobfJar (forge/neoforge), remapJar (fabric), jar (unobf).
+		dependsOn(
+			providers.provider {
+				tasks.findByName("reobfJar") ?: tasks.findByName("remapJar") ?: tasks.named("jar").get()
 			},
 		)
-
-		finalizedBy(tasks.named("optimizeMergedJar"))
+		// The input is the producer's standard archive path, never a directory scan: on a clean CI
+		// build/libs is still empty when the task graph is built, and a scan there fails the graph
+		// before anything has produced the jar.
+		jarFile.set(modJarFileName.flatMap { fileName -> libsDirectory.map { dir -> dir.file(fileName) } })
+		keeps.add("pl.skidam")
+		destinationDirectory.set(optimizedLibsDirectory)
+		archiveFileName.set(modJarFileName.map { it.removeSuffix(".jar") + "-optimized.jar" })
 	}
-
-val mergedJarWrapper =
-	tasks.register<Jar>("mergedJarWrapper") {
-		dependsOn(mergeJarTask)
-		enabled = false
-		destinationDirectory.set(File(mergedDirPath))
-	}
-
-val optimizedMergedJar = jarOptimizer.register(mergedJarWrapper, "pl.skidam")
-
-val optimizeMergedJarTask =
-	tasks.register("optimizeMergedJar") {
-		dependsOn(optimizedMergedJar)
-
-		val outputJarFile = mergeJarTask.flatMap { it.outputJar }
-		val optimizedFileProvider = optimizedMergedJar.flatMap { it.archiveFile }
-
-		inputs.file(outputJarFile)
-
-		doLast {
-			val jarPath = outputJarFile.get().asFile.readText()
-			val jarFile = File(jarPath)
-			if (!jarFile.exists()) {
-				println("Merged jar not found: ${jarFile.absolutePath}")
-				return@doLast
-			}
-
-			val time = System.currentTimeMillis()
-			val optimizedFile = optimizedFileProvider.get().asFile
-
-			if (optimizedFile.exists() && optimizedFile.length() > 0) {
-				jarFile.delete()
-				optimizedFile.renameTo(jarFile)
-				println("Optimized ${jarFile.name} - Took: ${System.currentTimeMillis() - time}ms")
-			}
-		}
-	}
-
-val auditMergedJarTask =
-	tasks.register<MergedJarAuditTask>("auditMergedJar") {
-		mergedJarPath.set(mergeJarTask.flatMap { it.outputJar })
-		maxJarBytes.set(3L * 1024 * 1024)
-		maxMusicBytes.set(64L * 1024)
-	}
-
-optimizeMergedJarTask.configure {
-	finalizedBy(auditMergedJarTask)
+optimizeModJar.configure {
+	inputs.property("automodpackBuildMode", automodpackBuildMode)
 }
