@@ -1,0 +1,94 @@
+------------------------------------
+# How AutoModpack Works
+------------------------------------
+
+AutoModpack automatically keeps every player synchronized with your Minecraft server.
+
+Instead of asking players to manually download ZIP files, install missing mods, or update configuration files, AutoModpack handles everything automatically whenever they join your server.
+
+Players only need to install AutoModpack before joining. From there, joining a modded server becomes almost as simple as joining a vanilla server.
+
+> **Note**
+>
+> AutoModpack does not create or manage your modpack for you.
+> It simply distributes the files that the server owner has configured.
+
+------------------------------------
+## How it Works
+------------------------------------
+
+Server Owner
+     │
+Creates or updates the modpack
+     │
+     ↓
+Player joins the server
+     │
+     ↓
+AutoModpack compares the local files
+     │
+     ↓
+Missing or updated files are downloaded
+(Modrinth, CurseForge or the server)
+     │
+     ↓
+Minecraft restarts
+     │
+     ↓
+Player joins the server
+
+------------------------------------
+## What gets synchronized?
+------------------------------------
+
+AutoModpack can synchronize almost any file required by your modpack, including:
+
+- Mods
+- Configuration files
+- Resource Packs
+- Shader Packs
+- Additional files configured by the server owner
+
+------------------------------------
+## Where are the files stored?
+------------------------------------
+
+Downloaded files are stored inside AutoModpack's own modpack directory instead of your default Minecraft folders.
+
+This allows AutoModpack to safely update files without interfering with your personal mods, shader packs, resource packs, or other files stored in the default Minecraft directories.
+
+If you want to learn more about the folder structure, see:
+[→ Folder Structure](references/folder-structure)
+
+------------------------------------
+## What AutoModpack does NOT do
+------------------------------------
+
+AutoModpack does not:
+
+- install Minecraft
+- install Fabric, Forge or NeoForge
+- choose mods for your server
+- decide when mods should be updated
+
+The server owner decides which files and versions belong to the modpack.
+
+When the server owner updates the modpack, AutoModpack downloads the required files for every player. Whenever possible, files are downloaded directly from Modrinth or CurseForge. Otherwise, they are downloaded from the server's AutoModpack host.
+
+------------------------------------
+## Next Steps
+------------------------------------
+
+I'm a Player
+
+     ↓
+
+[Player Quick Start](player-quick-start)
+
+-------------------
+
+I'm a Server Owner
+
+     ↓
+
+[Server Quick Start](server-quick-start)

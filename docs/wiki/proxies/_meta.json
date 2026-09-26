@@ -1,0 +1,34 @@
+{
+  "velocity.mdx": {
+    "name": "Velocity",
+    "icon": null
+  },
+  "loginphaseproxy.mdx": {
+    "name": "LoginPhaseProxy",
+    "icon": null
+  },
+  "backend-configuration.mdx": {
+    "name": "Backend Configuration",
+    "icon": null
+  },
+  "modern-forwarding.mdx": {
+    "name": "Modern Forwarding",
+    "icon": null
+  },
+  "multiple-backend-servers.mdx": {
+    "name": "Multiple Backend Servers",
+    "icon": null
+  },
+  "proxy-network-flow.mdx": {
+    "name": "Proxy Network Flow",
+    "icon": null
+  },
+  "troubleshooting.mdx": {
+    "name": "Troubleshooting",
+    "icon": null
+  },
+  "faq.mdx": {
+    "name": "FAQ",
+    "icon": null
+  }
+}

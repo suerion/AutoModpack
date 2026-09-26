@@ -1,0 +1,210 @@
+------------------------------------
+# Client Configuration Reference
+------------------------------------
+
+The AutoModpack client configuration is stored in:
+
+```text
+~/.minecraft/automodpack/automodpack-client.json
+```
+
+AutoModpack creates and updates this file automatically while the player uses AutoModpack-enabled servers.
+
+Unlike the server configuration, the client configuration contains both user preferences and automatically managed server connection data.
+
+Most values do not need to be edited manually.
+
+------------------------------------
+## Default Configuration
+------------------------------------
+
+```json
+{
+  "DO_NOT_CHANGE_IT": 2,
+  "selectedModpack": "",
+  "installedModpacks": {},
+  "updateSelectedModpackOnLaunch": true,
+  "selfUpdater": false,
+  "syncAutoModpackVersion": true,
+  "syncLoaderVersion": true,
+  "playMusic": true,
+  "allowRemoteNonModpackDeletions": true
+}
+```
+
+After connecting to AutoModpack servers, AutoModpack automatically fills in `selectedModpack` and `installedModpacks`.
+
+Example:
+
+```json
+{
+  "DO_NOT_CHANGE_IT": 2,
+  "selectedModpack": "ExampleModpack",
+  "installedModpacks": {
+    "ExampleModpack": {
+      "hostAddress": "play.example.com:25565",
+      "serverAddress": "play.example.com:25565",
+      "requiresMagic": true
+    }
+  },
+  "updateSelectedModpackOnLaunch": true,
+  "selfUpdater": false,
+  "syncAutoModpackVersion": true,
+  "syncLoaderVersion": true,
+  "playMusic": true,
+  "allowRemoteNonModpackDeletions": true
+}
+```
+
+> **Important**
+>
+> `selectedModpack`, `installedModpacks`, `hostAddress`, `serverAddress`, and `requiresMagic` are managed automatically by AutoModpack.
+>
+> These values reflect information supplied by the servers the player connects to and should normally not be edited manually.
+
+------------------------------------
+## Automatically Managed Values
+------------------------------------
+
+### `DO_NOT_CHANGE_IT`
+
+Internal configuration version used for automatic migration.
+
+Do not modify it manually.
+
+### `selectedModpack`
+
+Stores the currently selected modpack.
+
+AutoModpack updates this value automatically.
+
+### `installedModpacks`
+
+Stores known AutoModpack server and host connections.
+
+Each entry may contain:
+
+- `hostAddress`
+- `serverAddress`
+- `requiresMagic`
+
+These values are provided through the server connection process and reused when launching or updating installed modpacks.
+
+------------------------------------
+## Player Settings
+------------------------------------
+
+### `updateSelectedModpackOnLaunch`
+
+```json
+"updateSelectedModpackOnLaunch": true
+```
+
+Checks and updates the selected modpack when Minecraft starts.
+
+Recommended: **Enabled**
+
+### `selfUpdater`
+
+```json
+"selfUpdater": false
+```
+
+Allows AutoModpack to update its own client `.jar` automatically.
+
+This does not disable modpack installation or synchronization.
+
+### `syncAutoModpackVersion`
+
+```json
+"syncAutoModpackVersion": true
+```
+
+Synchronizes the client's AutoModpack version with the version required by the server.
+
+Recommended: **Enabled**
+
+### `syncLoaderVersion`
+
+```json
+"syncLoaderVersion": true
+```
+
+Allows AutoModpack to synchronize the required mod loader version when supported.
+
+Launcher support may vary.
+
+### `playMusic`
+
+```json
+"playMusic": true
+```
+
+Plays music while downloading a modpack.
+
+This is a cosmetic client preference.
+
+### `allowRemoteNonModpackDeletions`
+
+```json
+"allowRemoteNonModpackDeletions": true
+```
+
+Allows servers to request deletion of specifically identified old or conflicting files that are not part of the current modpack.
+
+The corresponding server setting is `nonModpackFilesToDelete`.
+
+When disabled, files requested for removal by the server must be deleted manually.
+
+------------------------------------
+## Relationship to the Server Configuration
+------------------------------------
+
+The server configuration determines:
+
+- Whether AutoModpack is required
+- Which mod loaders are accepted
+- Which files belong to the modpack
+- Which files may remain editable
+- Which old or conflicting files should be removed
+- Which AutoModpack host and connection behavior clients use
+
+The client configuration stores the resulting connection information automatically and controls the player's local update preferences.
+
+Players normally should not copy server addresses or modpack entries into this file manually.
+
+------------------------------------
+## Resetting the Client Configuration
+------------------------------------
+
+Deleting `automodpack-client.json` causes AutoModpack to generate a new default configuration the next time Minecraft starts.
+
+This resets client preferences and the automatically stored selected and installed modpack information.
+
+Deleting the complete `~/.minecraft/automodpack/` folder performs a broader reset and also removes:
+
+- Downloaded modpacks
+- Cached metadata
+- Saved server connection information
+- Saved certificate trust information
+
+------------------------------------
+## Troubleshooting
+------------------------------------
+
+If configuration changes do not take effect:
+
+- Restart Minecraft
+- Confirm that you edited the correct `automodpack-client.json`
+- Verify that the JSON syntax is valid
+- Check the Minecraft log for configuration errors
+- Check whether your installed AutoModpack version uses different field names
+
+------------------------------------
+## Related Guides
+------------------------------------
+
+- [→ Server Configuration Guide](server-owners/server-configuration)
+- [→ Server Configuration Reference](configuration/server-config)
+- [→ Player Quick Start](players/player-quick-start)
+- [→ Where are the Downloaded Files?](players/downloaded-files)

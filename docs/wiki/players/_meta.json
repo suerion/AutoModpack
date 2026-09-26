@@ -1,0 +1,22 @@
+{
+  "installation.mdx": {
+    "name": "Installation",
+    "icon": null
+  },
+  "joining-a-server.mdx": {
+    "name": "How to Join a Server",
+    "icon": null
+  },
+  "downloaded-files.mdx": {
+    "name": "Where are the Downloaded files",
+    "icon": null
+  },
+  "personal-client-mods.mdx": {
+    "name": "Personal Client Mods",
+    "icon": null
+  },
+  "faq.mdx": {
+    "name": "FAQ",
+    "icon": null
+  }
+}

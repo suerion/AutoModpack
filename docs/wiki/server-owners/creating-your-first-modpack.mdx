@@ -1,0 +1,199 @@
+------------------------------------
+# Creating your First Modpack
+------------------------------------
+
+Congratulations! Your server is now ready to use AutoModpack.
+
+With the default configuration, many servers already work without any additional setup.
+
+This guide shows you how to go beyond the defaults and create a modpack tailored to your server.
+
+You remain in full control over which files are distributed and how they are synchronized.
+
+AutoModpack can synchronize much more than just mods. Depending on your configuration, you can distribute:
+
+- Mods
+- Configuration files
+- Resource packs
+- Shader packs
+- Additional files required by your server
+
+One of AutoModpack's biggest advantages is that synchronized files remain usable by your players.
+
+For example, configuration files can be shared with every player while still allowing them to modify settings that are intended to remain client-specific. This makes it possible to provide sensible defaults without preventing players from customizing their own experience.
+
+By the end of this guide, you'll know how to prepare, configure, and test your modpack before inviting players.
+
+------------------------------------
+## Prepare Your Server
+------------------------------------
+
+Before generating your modpack, make sure your server is fully configured.
+
+This includes:
+
+- Installing all required mods
+- Configuring your server
+- Testing that the server starts correctly
+- Removing files that should not be distributed
+
+If you already have the complete modpack installed on your own client, try joining the server once **without AutoModpack**.
+
+If you can successfully join the server, your modpack is already working correctly. AutoModpack should only automate the distribution of your files, not compensate for an incorrectly configured server.
+
+------------------------------------
+## Decide What Should Be Synchronized
+------------------------------------
+
+By default, AutoModpack synchronizes the files from your server, including the standard `mods` folder and any additional folders configured for synchronization.
+
+Common synchronized content includes:
+
+- Mods
+- Configuration files
+- Resource packs
+- Shader packs
+- Additional files required by your server
+
+For most servers, this is all you need.
+
+------------------------------------
+### Optional Groups
+------------------------------------
+
+Groups are optional. If you do not configure any groups, every player simply receives the main modpack.
+
+If you want to distribute different content to different players, AutoModpack also supports optional Groups.
+
+The server's default synchronized files are always included. Groups only add or override additional content for specific players or use cases.
+
+This can be useful for setups such as:
+
+- Low-end and high-end graphics options
+- Optional client-side mods
+- Different modpack variants
+- Community-specific content
+
+Example:
+
+```text
+Server
+├── mods/                     ← Main synchronized mods
+├── config/
+└── ...
+
+automodpack/
+└── host-modpack/
+    ├── groups/
+    │   ├── low-end/
+    │   │   ├── mods/
+    │   │   └── config/
+    │   ├── high-end/
+    │   │   ├── mods/
+    │   │   └── config/
+    │   └── ...
+    └── ...
+```
+
+Players always receive the main synchronized content first.
+
+If a player belongs to one or more groups, AutoModpack additionally synchronizes the files contained in those groups.
+
+Not every file needs to be synchronized.
+
+Choose carefully which files your players actually need.
+
+Learn more:
+
+[→ Server Configuration](configuration/server-config)
+
+[→ Config Files](references/config-files)
+
+------------------------------------
+## Generate the Modpack
+------------------------------------
+
+Once your server is configured, start it with AutoModpack installed.
+
+During startup, AutoModpack scans all files and folders configured for synchronization and generates the information required to distribute your modpack.
+
+Depending on your server configuration, AutoModpack can automatically check for changes whenever the server starts. If files have been added, removed, or modified, the modpack information is updated automatically.
+
+The generated metadata is stored in `automodpack_content.json`.
+
+This file is automatically regenerated whenever the modpack information is regenerated.
+
+Clients use this file to determine:
+
+- Which files belong to the modpack
+- Which files have changed
+- Which files need to be downloaded
+- Where files should be downloaded from
+
+Whenever possible, AutoModpack references the original download source on Modrinth or CurseForge instead of serving the file directly.
+
+Files that are not available from a supported platform are automatically distributed by your AutoModpack server.
+
+------------------------------------
+## Publishing Changes
+------------------------------------
+
+Whenever you add, remove, or modify synchronized content, AutoModpack needs to regenerate the modpack information.
+
+Depending on your configuration, this happens automatically during server startup or manually by using the appropriate AutoModpack command.
+
+Once the modpack information has been regenerated, players automatically receive the required changes the next time they join your server.
+
+Only files that have changed are downloaded or synchronized. Unchanged files are reused, reducing download times, bandwidth usage, and making updates significantly faster than downloading the entire modpack again.
+
+------------------------------------
+## Test Your Modpack
+------------------------------------
+
+Before inviting players, always test your modpack using a clean Minecraft instance.
+
+For the best results:
+
+- Install only AutoModpack
+- Join your server
+- Verify that all files download correctly
+- Restart Minecraft if prompted
+- Join the server again
+- Confirm that everything works as expected
+
+A clean test client provides the same experience your players will have when joining for the first time.
+
+If you want to simulate a true first-time player experience, you can also remove AutoModpack's downloaded data before testing.
+
+For example, you can delete:
+
+- The `~/automodpack/` folder
+- The `.fabric/` cache (if applicable)
+- Other launcher or mod loader caches, if applicable
+
+This forces AutoModpack to perform a fresh synchronization, making it much easier to detect missing files or configuration issues before your players encounter them.
+
+------------------------------------
+## Before Inviting Players
+------------------------------------
+
+Before making your server public, make sure that:
+
+- The server starts without errors.
+- Certificate verification works as expected.
+- A clean client can join successfully.
+- All required files are downloaded correctly.
+- Minecraft restarts when required.
+- The player can join successfully after the restart.
+- Configuration files synchronize correctly.
+- Resource packs and shader packs are applied correctly.
+- Optional client-side content works as intended.
+- No unexpected warnings or errors appear in the server log.
+
+------------------------------------
+## Next Step
+------------------------------------
+
+Continue with:
+
+[→ Server Configuration](server-owners/server-configuration)

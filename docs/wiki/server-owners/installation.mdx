@@ -1,0 +1,108 @@
+------------------------------------
+# Server Installation
+------------------------------------
+
+Installing AutoModpack on your server only takes a few minutes.
+
+Once installed, AutoModpack automatically generates its configuration and prepares everything needed to create and distribute your modpack.
+
+------------------------------------
+## Requirements
+------------------------------------
+
+Before installing AutoModpack, make sure your server is running:
+
+- The correct Minecraft version
+- The correct mod loader (Fabric, Forge, or NeoForge)
+- A compatible AutoModpack version
+
+If you are unsure which version to use, download the AutoModpack release matching your Minecraft version and mod loader.
+
+------------------------------------
+## Install AutoModpack
+------------------------------------
+
+Place the AutoModpack `.jar` file into your server's `mods` folder.
+
+Example:
+
+```text
+server/
+└── mods/
+    └── automodpack.jar
+```
+
+Start the server once.
+
+During the first startup, AutoModpack generates its configuration files and creates the required directories.
+
+------------------------------------
+## Configure AutoModpack
+------------------------------------
+
+After the first startup, AutoModpack generates a default configuration that works well for most servers.
+
+For many servers, no additional configuration is required.
+
+If your server uses a custom network setup or you want to customize how AutoModpack distributes files, you can configure options such as:
+
+- Public download addresses
+- Reverse proxies or port forwarding
+- Tunnel services (for example Playit.gg)
+- Which files and folders should be synchronized
+- Optional AutoModpack features
+
+For a complete explanation of every available option, see:
+
+[→ Server Configuration](configuration/server-config)
+
+------------------------------------
+## Configure Certificate Verification
+------------------------------------
+
+Before players can securely download your modpack, configure a certificate verification method.
+
+For public servers, we recommend using a domain with a trusted TLS certificate whenever possible. This provides the simplest experience for players and requires no manual verification.
+
+If a trusted certificate is not available, AutoModpack also supports other verification methods, including DNSSEC AMP1, embedded fingerprints, and manual verification.
+
+Learn more here:
+
+[→ Certificate Verification](technical-details/certificate-system)
+
+------------------------------------
+## Create Your First Modpack
+------------------------------------
+
+Once AutoModpack is installed and configured, you're ready to create your first modpack.
+
+The next guide explains how to:
+
+- Prepare your mods
+- Configure synchronized files
+- Generate the modpack
+- Test everything before inviting players
+
+------------------------------------
+## Compatibility
+------------------------------------
+
+Most servers work with AutoModpack without additional configuration.
+
+However, some proxies, mods, or custom network setups may require additional configuration or compatibility settings.
+
+Learn more here:
+
+[→ Proxy Compatibility](compatibility/proxies)
+
+[→ Mod Compatibility](compatibility/mods)
+
+------------------------------------
+## Next Step
+------------------------------------
+
+Your server is now ready to create its first synchronized modpack.
+
+Continue with:
+
+[→ Creating your First Modpack](server-owners/creating-your-first-modpack)
